@@ -30,6 +30,7 @@
 #include "vram_pitch.h"
 
 #include "hardware/regs/addressmap.h"
+#include "hardware/dma.h"
 #include "hardware/sync.h"
 #include "hardware/xip_cache.h"
 #include "pico/time.h"
@@ -127,17 +128,68 @@ static inline void copy_px(u16 *dst, const u16 *src, int n) {
  * 0 idle, 1 primitive, 2 slot flush, 3 slot load, 4 clear, 5 other VRAM op */
 volatile uint8_t gpu_c1_state;
 
+volatile uint32_t flush_maint_us, flush_copy_us, flush_rows_skipped; /* diagnostic */
+
+/* What each VRAM row in PSRAM last received from a slot flush: x range and
+ * a hash of the pixels. Title and menu screens redraw the same backdrop every
+ * frame, and with double buffering a PSRAM buffer was written two frames
+ * ago with (mostly) the same rows: those are skipped instead of copied.
+ * Anything else writing PSRAM VRAM forgets the rows it touches
+ * (vrow_forget). */
+static uint32_t vrow_hash[VRAM_H];
+static uint16_t vrow_x0[VRAM_H], vrow_w[VRAM_H]; /* w == 0: unknown */
+
+static void vrow_forget(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    if (h > VRAM_H) h = VRAM_H;
+    for (int j = 0; j < h; j++) {
+        int r = (y + j) & (VRAM_H - 1);
+        if (vrow_w[r] && x < vrow_x0[r] + vrow_w[r] && x + w > vrow_x0[r]) vrow_w[r] = 0;
+    }
+}
+
+static inline uint32_t row_hash(const u16 *p, int n) {
+    const uint32_t *q = (const uint32_t *)p;
+    uint32_t h = 2166136261u ^ (uint32_t)n;
+    int k = 0;
+    for (; k + 1 < n; k += 2) h = (h ^ *q++) * 16777619u;
+    if (n & 1) h = (h ^ p[n - 1]) * 16777619u;
+    return h;
+}
+
+/* Slot rows go to PSRAM by CPU stores. Not by DMA: a DMA channel writing
+ * PSRAM stalls the DMA master on every write and the HSTX channels with it
+ * (tried: 2.5x faster copy, no HDMI signal). */
 static void slot_flush_c(Slot *s, int cause) {
     if (!s->used || !s->dirty || !s->loaded) return;
     uint8_t prev_state = gpu_c1_state;
     gpu_c1_state = 2;
     gpu_flush_cause[cause]++;
     uint64_t t = time_us_64();
+    bool hashable = !(((uintptr_t)s->base) & 3) && !(s->sw & 1);
     for (int j = 0; j < s->h; j++) {
-        u16 *row = g_PsxVram + (s->y0 + j) * VRAM_PITCH + s->x0;
+        int vy = (s->y0 + j) & (VRAM_H - 1);
+        u16 *row = g_PsxVram + vy * VRAM_PITCH + s->x0;
+        const u16 *src = s->base + j * s->sw;
         if (get_core_num() == 1) Video_ScanSync();
+        if (hashable) {
+            uint32_t h = row_hash(src, s->w);
+            if (vrow_w[vy] == s->w && vrow_x0[vy] == s->x0 && vrow_hash[vy] == h) {
+                flush_rows_skipped++; /* PSRAM already holds exactly this row */
+                continue;
+            }
+            vrow_hash[vy] = h;
+            vrow_x0[vy] = (uint16_t)s->x0;
+            vrow_w[vy] = (uint16_t)s->w;
+        } else {
+            vrow_forget(s->x0, vy, s->w, 1);
+        }
+        uint32_t c0 = time_us_32();
         row_cache_sync(row, s->w, true);
-        copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), s->base + j * s->sw, s->w);
+        uint32_t c1 = time_us_32();
+        copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), src, s->w);
+        flush_maint_us += c1 - c0;
+        flush_copy_us += time_us_32() - c1;
     }
     s->dirty = false;
     gpu_shadow_us += (uint32_t)(time_us_64() - t);
@@ -351,8 +403,10 @@ static void load_image_fast(const PS1_RECT *r, const u16 *src) {
     int w = r->w, h = r->h;
     if (r->x < 0 || r->y < 0 || r->x + w > VRAM_W || w <= 0 || h <= 0) {
         soft_load_image(r, src);
+        vrow_forget(0, 0, VRAM_W, VRAM_H);
         return;
     }
+    vrow_forget(r->x, r->y, w, h);
     for (int j = 0; j < h; j++) {
         u16 *row = g_PsxVram + ((r->y + j) & (VRAM_H - 1)) * VRAM_PITCH + r->x;
         row_cache_sync(row, w, true);
@@ -375,6 +429,7 @@ static void exec_prim(u_long *packets, int len) {
     }
     draw_into(i);
     soft_push_prim(packets, len);
+    if (i < 0) vrow_forget(st.x0, st.y0, st.x1 - st.x0 + 1, st.y1 - st.y0 + 1); /* drew into PSRAM */
     uint32_t dt = (uint32_t)(time_us_64() - t);
     gpu_prim_us += dt;
     gpu_prims++;
@@ -430,6 +485,7 @@ static void exec_clear(PS1_RECT *rect, u_char r, u_char g, u_char b) {
         u16 c = (u16)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10));
         uint32_t c2 = c | ((uint32_t)c << 16);
         for (int j = 0; j < s->h; j++) {
+            scan_poll(); /* a 512x240 clear is long enough to starve the scanout */
             u16 *row = s->base + j * s->sw;
             int n = s->w;
             if (((uintptr_t)row & 2) && n) {
@@ -446,6 +502,7 @@ static void exec_clear(PS1_RECT *rect, u_char r, u_char g, u_char b) {
     } else {
         before_write(rect);
         soft_clear_image(rect, r, g, b);
+        vrow_forget(rect->x, rect->y, rect->w, rect->h);
     }
     gpu_vram_us += (uint32_t)(time_us_64() - t0);
 }
@@ -455,6 +512,7 @@ static void exec_move(PS1_RECT *rect, int x, int y) {
     before_read(rect);
     before_write(&dst);
     TIMED(soft_move_image(rect, x, y));
+    vrow_forget(x, y, rect->w, rect->h);
 }
 
 /* frame timeline (perf log): offsets from the last VSync return */
@@ -511,6 +569,7 @@ bool __not_in_flash_func(Gpu_Core1Work)(uint32_t budget_us) {
 
 void Draw_Reset(void) {
     gpu_fence_c(4);
+    vrow_forget(0, 0, VRAM_W, VRAM_H);
     slot[0].used = slot[1].used = slot[2].used = false;
     cur = -1;
     clut_cache_flush();

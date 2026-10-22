@@ -299,9 +299,13 @@ static inline bool __attribute__((always_inline)) fill_one(void) {
             }
             if (stream_row > beam_row + 3) return false;
             if (stream_row <= beam_row + 2) {
-                /* starved by other PSRAM traffic and about to be shown: give
-                 * up on the stream and copy the row with the CPU, whose cache
-                 * fills take priority over the stream on the QMI */
+                /* About to be shown. Stop issuing PSRAM reads: with core 1
+                 * idle the stream gets the QMI and lands in a few tens of us,
+                 * cheaper than copying the row by CPU. Rescue only a stream
+                 * that is still stuck after 40 us. */
+                uint32_t t0 = time_us_32();
+                while (dma_channel_is_busy(stream_ch) && time_us_32() - t0 < 40) tight_loop_contents();
+                if (!dma_channel_is_busy(stream_ch)) break;
                 stream_abort();
                 psxv_stream_rescues++;
                 stream_row = -1;
@@ -502,6 +506,13 @@ static void frame_stats(uint64_t work_us) {
                    soft_tri_span_cyc / stat_frames);
             soft_tri_n = soft_tri_setup_cyc = soft_tri_span_cyc = 0;
 
+        }
+        {
+            extern volatile uint32_t flush_maint_us, flush_copy_us, flush_rows_skipped;
+            PV("[perf] slot flush: cache maintenance %lu us, copy %lu us, %lu rows unchanged per frame\n",
+               (unsigned long)(flush_maint_us / stat_frames), (unsigned long)(flush_copy_us / stat_frames),
+               (unsigned long)(flush_rows_skipped / stat_frames));
+            flush_maint_us = flush_copy_us = flush_rows_skipped = 0;
         }
         extern volatile uint32_t ds_site_pc[8], ds_site_n[8], ds_site_us[8];
         for (int i = 0; i < 8 && ds_site_pc[i]; i++) {
