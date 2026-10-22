@@ -259,6 +259,8 @@ static void tex_hook(u16 tpage, u16 clut) {
 
 
 
+
+
 #define SOFT_RASTER_STANDALONE
 #define SOFT_RASTER_NO_FALLBACK
 #define SOFT_CLUT_CACHE
