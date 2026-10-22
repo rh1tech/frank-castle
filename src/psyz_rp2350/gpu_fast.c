@@ -46,6 +46,12 @@ u16 g_PsxVram[VRAM_W * VRAM_H] __attribute__((section(".psram_bss.vram"), aligne
 #define SLOT_PIXELS (LINE_PX * 208)
 #define SHADOW_PIXELS (2 * SLOT_PIXELS)
 static u16 shadow_buf[SHADOW_PIXELS] __attribute__((aligned(4)));
+/* Small offscreen render targets (SOTN draws a 63x63 one every scrolling
+ * frame) get their own slot instead of evicting a framebuffer. */
+#define AUX_PIXELS (80 * 80)
+#define FB_MIN_PIXELS 32768 /* draw areas this big are framebuffers */
+static u16 aux_buf[AUX_PIXELS] __attribute__((aligned(4)));
+#define NSLOT 3
 
 typedef struct {
     int x0, y0, w, h;
@@ -59,11 +65,20 @@ typedef struct {
     bool dirty;  /* newer than PSRAM */
 } Slot;
 
-static Slot slot[2];
+static Slot slot[NSLOT];
 static int cur = -1;          /* slot DROW() draws into, -1 = PSRAM */
 static u16 *draw_origin;      /* draw_origin + y*sw + x == pixel (x,y) */
 static int draw_sw;
 volatile uint32_t gpu_shadow_us;
+/* why slots were flushed/loaded (diagnostic): tex, read, write, evict, load */
+volatile uint32_t gpu_flush_cause[5];
+volatile int gpu_last_alloc[4];
+volatile int gpu_allocs[8][5], gpu_alloc_n;
+#define CAUSE_TEX 0
+#define CAUSE_READ 1
+#define CAUSE_WRITE 2
+#define CAUSE_EVICT 3
+#define CAUSE_LOAD 4
 
 #define DROW(y) (cur >= 0 ? draw_origin + (y) * draw_sw : g_PsxVram + (y) * VRAM_W)
 
@@ -98,8 +113,9 @@ static inline void copy_px(u16 *dst, const u16 *src, int n) {
     }
 }
 
-static void slot_flush(Slot *s) {
+static void slot_flush_c(Slot *s, int cause) {
     if (!s->used || !s->dirty || !s->loaded) return;
+    gpu_flush_cause[cause]++;
     uint64_t t = time_us_64();
     for (int j = 0; j < s->h; j++) {
         u16 *row = g_PsxVram + (s->y0 + j) * VRAM_W + s->x0;
@@ -110,7 +126,10 @@ static void slot_flush(Slot *s) {
     gpu_shadow_us += (uint32_t)(time_us_64() - t);
 }
 
+#define slot_flush(s) slot_flush_c(s, CAUSE_EVICT)
+
 static void slot_load(Slot *s) {
+    gpu_flush_cause[CAUSE_LOAD]++;
     uint64_t t = time_us_64();
     for (int j = 0; j < s->h; j++) {
         const u16 *row = g_PsxVram + (s->y0 + j) * VRAM_W + s->x0;
@@ -128,8 +147,8 @@ static void slot_release(Slot *s) {
 }
 
 static void flush_overlapping(int x, int y, int w, int h) {
-    for (int i = 0; i < 2; i++)
-        if (overlaps(&slot[i], x, y, w, h)) slot_flush(&slot[i]);
+    for (int i = 0; i < NSLOT; i++)
+        if (overlaps(&slot[i], x, y, w, h)) slot_flush_c(&slot[i], CAUSE_READ);
 }
 
 /* the rectangle the scanout will show next (see video.c) */
@@ -141,13 +160,20 @@ static bool is_display_rect(const Slot *s) {
 
 /* Find or allocate the slot for rect; -1 if it does not fit. */
 static int slot_for(int x, int y, int w, int h) {
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < NSLOT; i++)
         if (slot[i].used && slot[i].x0 == x && slot[i].y0 == y && slot[i].w == w && slot[i].h == h)
             return i;
     int pad = x & 1, sw = (w + pad + 1) & ~1, margin = 0;
     if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > VRAM_W || y + h > VRAM_H ||
         sw * h > SHADOW_PIXELS)
         return -1;
+    if (w * h < FB_MIN_PIXELS) {
+        /* small offscreen target: the aux slot, or PSRAM if too big for it */
+        if (sw * h > AUX_PIXELS) return -1;
+        slot_release(&slot[2]);
+        slot[2] = (Slot){x, y, w, h, sw, pad, 0, aux_buf + pad, true, false, false, false};
+        return 2;
+    }
     if (w + pad <= LINE_PX && LINE_PX * h <= SLOT_PIXELS) {
         margin = (LINE_PX - w) / 2 & ~1;
         sw = LINE_PX;
@@ -167,6 +193,19 @@ static int slot_for(int x, int y, int w, int h) {
         /* never take the slot about to be shown */
         victim = !slot[0].used ? 0 : !slot[1].used ? 1 : is_display_rect(&slot[0]) ? 1 : 0;
         slot_release(&slot[victim]);
+    }
+    gpu_last_alloc[0] = x; gpu_last_alloc[1] = y; gpu_last_alloc[2] = w; gpu_last_alloc[3] = h;
+    {
+        bool seen = false;
+        for (int k = 0; k < gpu_alloc_n; k++)
+            if (gpu_allocs[k][0] == x && gpu_allocs[k][1] == y && gpu_allocs[k][2] == w && gpu_allocs[k][3] == h) {
+                gpu_allocs[k][4]++;
+                seen = true;
+            }
+        if (!seen && gpu_alloc_n < 8) {
+            int *e = (int *)gpu_allocs[gpu_alloc_n++];
+            e[0] = x; e[1] = y; e[2] = w; e[3] = h; e[4] = 1;
+        }
     }
     Slot *s = &slot[victim];
     u16 *mem = shadow_buf + (whole ? 0 : victim * SLOT_PIXELS);
@@ -188,10 +227,10 @@ static void tex_hook(u16 tpage, u16 clut) {
     int bpp = (tpage >> 7) & 3;
     int px = (tpage & 0xF) * 64, py = ((tpage >> 4) & 1) * 256;
     int pw = bpp == 0 ? 64 : bpp == 1 ? 128 : 256;
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < NSLOT; i++)
         if (slot[i].dirty && (overlaps(&slot[i], px, py, pw, 256) ||
                               overlaps(&slot[i], (clut & 0x3F) * 16, (clut >> 6) & 0x1FF, 256, 1)))
-            slot_flush(&slot[i]);
+            slot_flush_c(&slot[i], CAUSE_TEX);
 }
 #define TEX_HOOK(tpage, clut) tex_hook(tpage, clut)
 
@@ -204,21 +243,100 @@ static void tex_hook(u16 tpage, u16 clut) {
 /* profiling: microseconds spent rasterizing / moving VRAM, read by video.c */
 volatile uint32_t gpu_prim_us, gpu_vram_us, gpu_prims;
 
-void Draw_Reset(void) {
-    slot[0].used = slot[1].used = false;
-    cur = -1;
+/* ================================================================== */
+/* Asynchronous GPU: core 0 (game) queues, core 1 rasterizes.          */
+/*                                                                    */
+/* psyz walks each ordering table synchronously and calls Draw_* per   */
+/* packet. Those calls only copy the packet into a ring; core 1 runs   */
+/* the rasterizer from it (Gpu_Core1Work) while the game builds its    */
+/* next frame. Ops that move pixel data in or out of VRAM, and the     */
+/* VSync before a frame is shown, first wait for the ring to drain     */
+/* (gpu_fence), so the cores never touch GPU state at the same time.   */
+/* ================================================================== */
+
+#define GQ_WORDS 8192 /* 32 KB; a busy SOTN frame queues ~5k words */
+static uint32_t gq[GQ_WORDS] __attribute__((aligned(4)));
+static volatile uint32_t gq_head, gq_tail; /* word counters, wrap modulo 2^32 */
+static volatile bool gq_exec;             /* core 1 is executing a command */
+volatile uint32_t gpu_fence_us;            /* core 0 time spent waiting */
+
+enum { GQ_PRIM = 1, GQ_TPAGE, GQ_TWIN, GQ_AREA0, GQ_AREA1, GQ_OFFSET, GQ_MASK, GQ_CLEAR, GQ_MOVE, GQ_LOAD };
+/* uploads up to this size are queued with their pixels (SOTN uploads the
+ * player's sprite every frame); bigger ones wait for the queue to drain */
+#define GQ_LOAD_MAX_WORDS 2048
+static uint32_t load_buf[GQ_LOAD_MAX_WORDS + 2] __attribute__((aligned(4)));
+
+/* hdr words, then payload words */
+static void gq_push2(uint32_t type, const uint32_t *w, uint32_t n, const uint32_t *p, uint32_t pn) {
+    uint32_t total = n + pn;
+    while (GQ_WORDS - (gq_head - gq_tail) < total + 1) tight_loop_contents(); /* ring full */
+    uint32_t h = gq_head;
+    gq[h & (GQ_WORDS - 1)] = type << 24 | total;
+    for (uint32_t i = 0; i < n; i++) gq[(h + 1 + i) & (GQ_WORDS - 1)] = w[i];
+    for (uint32_t i = 0; i < pn; i++) gq[(h + 1 + n + i) & (GQ_WORDS - 1)] = p[i];
+    __dmb();
+    gq_head = h + 1 + total;
+}
+static inline void gq_push(uint32_t type, const uint32_t *w, uint32_t n) { gq_push2(type, w, n, NULL, 0); }
+
+volatile uint32_t gpu_fence_by[6]; /* us waited: sync, display, load, store, reset, other */
+static void gpu_fence_c(int why) {
+    if (gq_head == gq_tail && !gq_exec) return;
+    uint64_t t = time_us_64();
+    while (gq_head != gq_tail || gq_exec) tight_loop_contents();
+    __dmb();
+    uint32_t dt = (uint32_t)(time_us_64() - t);
+    gpu_fence_us += dt;
+    gpu_fence_by[why] += dt;
+}
+#define gpu_fence() gpu_fence_c(5)
+
+/* Words a GP0 primitive occupies -- the same accounting as soft_push_prim,
+ * which the caller needs right away to walk the packet stream. */
+static int prim_len(const u_long *p, int max_len) {
+    int code = (int)(p[0] >> 24) & 0xFF;
+    bool textured = (code & TEXTURED) != 0, gouraud = (code & GOURAUD) != 0;
+    int n;
+    if (!(code & 0x40)) { /* polygon */
+        if (!(code & TRIANGLE)) return 1;
+        int v = (code & EXTRA_VERTEX) ? 4 : 3;
+        n = 1 + v * (1 + textured) + (gouraud ? v - 1 : 0);
+    } else if (!(code & 0x20)) { /* line */
+        int pts = ((code >> 2) & 3) + 1;
+        bool padding = true;
+        if (pts == 1) {
+            padding = false;
+            pts = 2;
+        }
+        n = 1 + pts + (gouraud ? pts - 1 : 0) + padding;
+    } else { /* rectangle */
+        n = 2 + textured + ((code & 0x18) == 0 ? 1 : 0);
+    }
+    return n < max_len ? n : max_len;
+}
+
+/* VRAM upload: rows go straight to PSRAM through the uncached alias (a
+ * cached store costs a write-allocate per 8-byte line); the cached copy of
+ * each row is cleaned and invalidated first. */
+static void load_image_fast(const PS1_RECT *r, const u16 *src) {
+    if (!src) return;
     clut_cache_flush();
-    st = (SoftState){0, 0, VRAM_W - 1, VRAM_H - 1, 0, 0};
-    cur_tpage = 0;
+    int w = r->w, h = r->h;
+    if (r->x < 0 || r->y < 0 || r->x + w > VRAM_W || w <= 0 || h <= 0) {
+        soft_load_image(r, src);
+        return;
+    }
+    for (int j = 0; j < h; j++) {
+        u16 *row = g_PsxVram + ((r->y + j) & (VRAM_H - 1)) * VRAM_W + r->x;
+        row_cache_sync(row, w, true);
+        copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), src, w);
+        src += w;
+    }
 }
 
-int Draw_SetHorizontalGrid(unsigned int source_width, unsigned int target_width) {
-    (void)source_width;
-    (void)target_width;
-    return 0;
-}
+/* ---- core 1: execution ---- */
 
-int Draw_PushPrim(u_long *packets, int max_len) {
+static void exec_prim(u_long *packets, int len) {
     uint64_t t = time_us_64();
     int i = slot_for(st.x0, st.y0, st.x1 - st.x0 + 1, st.y1 - st.y0 + 1);
     if (i >= 0) {
@@ -226,10 +344,9 @@ int Draw_PushPrim(u_long *packets, int max_len) {
         slot[i].dirty = true;
     }
     draw_into(i);
-    int r = soft_push_prim(packets, max_len);
+    soft_push_prim(packets, len);
     gpu_prim_us += (uint32_t)(time_us_64() - t);
     gpu_prims++;
-    return r;
 }
 
 #define TIMED(call)                                                   \
@@ -244,20 +361,19 @@ static void before_read(const PS1_RECT *r) { flush_overlapping(r->x, r->y, r->w,
 
 /* A VRAM op writes rect in PSRAM: overlapping slots must reload it. */
 static void before_write(const PS1_RECT *r) {
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < NSLOT; i++)
         if (overlaps(&slot[i], r->x, r->y, r->w, r->h)) {
-            slot_flush(&slot[i]);
+            slot_flush_c(&slot[i], CAUSE_WRITE);
             slot[i].loaded = false;
         }
 }
 
-void Draw_ClearImage(PS1_RECT *rect, u_char r, u_char g, u_char b) {
-    if (!rect->w || !rect->h) return;
+static void exec_clear(PS1_RECT *rect, u_char r, u_char g, u_char b) {
     uint64_t t0 = time_us_64();
     /* clearing a whole framebuffer (a slot's rectangle, or the draw area):
      * fill its slot, no load needed */
     int i = -1;
-    for (int k = 0; k < 2; k++)
+    for (int k = 0; k < NSLOT; k++)
         if (slot[k].used && slot[k].x0 == rect->x && slot[k].y0 == rect->y &&
             slot[k].w == rect->w && slot[k].h == rect->h)
             i = k;
@@ -288,27 +404,150 @@ void Draw_ClearImage(PS1_RECT *rect, u_char r, u_char g, u_char b) {
     }
     gpu_vram_us += (uint32_t)(time_us_64() - t0);
 }
-void Draw_LoadImage(PS1_RECT *rect, u_long *p) {
-    if (!rect->w || !rect->h) return;
-    before_write(rect);
-    TIMED(soft_load_image(rect, (const u16 *)p));
-}
-void Draw_StoreImage(PS1_RECT *rect, u_long *p) {
-    if (!rect->w || !rect->h) return;
-    before_read(rect);
-    TIMED(soft_store_image(rect, (u16 *)p));
-}
-void Draw_MoveImage(PS1_RECT *rect, unsigned int x, unsigned int y) {
-    if (!rect->w || !rect->h) return;
+
+static void exec_move(PS1_RECT *rect, int x, int y) {
     PS1_RECT dst = {(short)x, (short)y, rect->w, rect->h};
     before_read(rect);
     before_write(&dst);
-    TIMED(soft_move_image(rect, (int)x, (int)y));
+    TIMED(soft_move_image(rect, x, y));
+}
+
+/* Run queued commands for up to budget_us. Returns true if it did work. */
+volatile uint32_t gpu_busy_us; /* core 1 time in Gpu_Core1Work (diagnostic) */
+bool __not_in_flash_func(Gpu_Core1Work)(uint32_t budget_us) {
+    if (gq_head == gq_tail) return false;
+    uint32_t t0 = time_us_32();
+    static uint32_t w[64];
+    do {
+        gq_exec = true;
+        __dmb();
+        uint32_t t = gq_tail;
+        uint32_t hdr = gq[t & (GQ_WORDS - 1)];
+        uint32_t type = hdr >> 24, n = hdr & 0xFFFFFF;
+        if (type == GQ_LOAD) {
+            for (uint32_t i = 0; i < n; i++) load_buf[i] = gq[(t + 1 + i) & (GQ_WORDS - 1)];
+        } else {
+            for (uint32_t i = 0; i < n && i < 64; i++) w[i] = gq[(t + 1 + i) & (GQ_WORDS - 1)];
+        }
+        switch (type) {
+        case GQ_PRIM: exec_prim((u_long *)w, (int)n); break;
+        case GQ_TPAGE: soft_set_texpage_mode((ParamDrawTexpageMode *)&w[0]); break;
+        case GQ_TWIN: soft_set_texture_window(w[0], w[1], w[2], w[3]); break;
+        case GQ_AREA0: soft_set_area_start((int)w[0], (int)w[1]); break;
+        case GQ_AREA1: soft_set_area_end((int)w[0], (int)w[1]); break;
+        case GQ_OFFSET: soft_set_offset((int)w[0], (int)w[1]); break;
+        case GQ_MASK: soft_set_mask((int)w[0], (int)w[1]); break;
+        case GQ_CLEAR: exec_clear((PS1_RECT *)&w[0], (u_char)w[2], (u_char)w[3], (u_char)w[4]); break;
+        case GQ_MOVE: exec_move((PS1_RECT *)&w[0], (int)w[2], (int)w[3]); break;
+        case GQ_LOAD: {
+            PS1_RECT *r = (PS1_RECT *)&load_buf[0];
+            before_write(r);
+            TIMED(load_image_fast(r, (const u16 *)&load_buf[2]));
+            break;
+        }
+        }
+        __dmb();
+        gq_tail = t + 1 + n;
+        gq_exec = false;
+    } while (gq_head != gq_tail && time_us_32() - t0 < budget_us);
+    gpu_busy_us += time_us_32() - t0;
+    return true;
+}
+
+/* ---- core 0: the psyz Draw_* backend ---- */
+
+void Draw_Reset(void) {
+    gpu_fence_c(4);
+    slot[0].used = slot[1].used = slot[2].used = false;
+    cur = -1;
+    clut_cache_flush();
+    st = (SoftState){0, 0, VRAM_W - 1, VRAM_H - 1, 0, 0};
+    cur_tpage = 0;
+}
+
+int Draw_SetHorizontalGrid(unsigned int source_width, unsigned int target_width) {
+    (void)source_width;
+    (void)target_width;
+    return 0;
+}
+
+int Draw_PushPrim(u_long *packets, int max_len) {
+    int n = prim_len(packets, max_len);
+    if (n > 64) n = 64;
+    gq_push(GQ_PRIM, (const uint32_t *)packets, (uint32_t)n);
+    return n;
+}
+
+void Draw_SetTexpageMode(ParamDrawTexpageMode *p) {
+    uint32_t w = *(uint32_t *)p;
+    gq_push(GQ_TPAGE, &w, 1);
+}
+void Draw_SetTextureWindow(unsigned int mask_x, unsigned int mask_y, unsigned int off_x,
+                           unsigned int off_y) {
+    uint32_t w[4] = {mask_x, mask_y, off_x, off_y};
+    gq_push(GQ_TWIN, w, 4);
+}
+void Draw_SetAreaStart(int x, int y) {
+    uint32_t w[2] = {(uint32_t)x, (uint32_t)y};
+    gq_push(GQ_AREA0, w, 2);
+}
+void Draw_SetAreaEnd(int x, int y) {
+    uint32_t w[2] = {(uint32_t)x, (uint32_t)y};
+    gq_push(GQ_AREA1, w, 2);
+}
+void Draw_SetOffset(int x, int y) {
+    uint32_t w[2] = {(uint32_t)x, (uint32_t)y};
+    gq_push(GQ_OFFSET, w, 2);
+}
+void Draw_SetMask(int bit0, int bit1) {
+    uint32_t w[2] = {(uint32_t)bit0, (uint32_t)bit1};
+    gq_push(GQ_MASK, w, 2);
+}
+
+void Draw_ClearImage(PS1_RECT *rect, u_char r, u_char g, u_char b) {
+    if (!rect->w || !rect->h) return;
+    uint32_t w[5];
+    memcpy(w, rect, sizeof(PS1_RECT)); /* 8 bytes: x y w h */
+    w[2] = r;
+    w[3] = g;
+    w[4] = b;
+    gq_push(GQ_CLEAR, w, 5);
+}
+
+void Draw_MoveImage(PS1_RECT *rect, unsigned int x, unsigned int y) {
+    if (!rect->w || !rect->h) return;
+    uint32_t w[4];
+    memcpy(w, rect, sizeof(PS1_RECT));
+    w[2] = x;
+    w[3] = y;
+    gq_push(GQ_MOVE, w, 4);
+}
+
+/* Data in/out of VRAM: drain the queue, then run on this core. */
+void Draw_LoadImage(PS1_RECT *rect, u_long *p) {
+    if (!rect->w || !rect->h) return;
+    uint32_t words = ((uint32_t)rect->w * (uint32_t)rect->h + 1) / 2;
+    if (p && rect->w > 0 && rect->h > 0 && words <= GQ_LOAD_MAX_WORDS) {
+        uint32_t w[2];
+        memcpy(w, rect, sizeof(PS1_RECT));
+        gq_push2(GQ_LOAD, w, 2, (const uint32_t *)p, words);
+        return;
+    }
+    gpu_fence_c(2);
+    before_write(rect);
+    TIMED(load_image_fast(rect, (const u16 *)p));
+}
+void Draw_StoreImage(PS1_RECT *rect, u_long *p) {
+    if (!rect->w || !rect->h) return;
+    gpu_fence_c(3);
+    before_read(rect);
+    TIMED(soft_store_image(rect, (u16 *)p));
 }
 
 /* Called by video.c before waiting for vblank. A frame held in a half slot
  * is scanned out from SRAM; a whole-area one must be in PSRAM. */
 void Gpu_FlushForDisplay(void) {
+    gpu_fence_c(1); /* the frame about to be shown must be fully drawn */
     if (slot[0].whole) slot_flush(&slot[0]);
 }
 
@@ -337,4 +576,12 @@ void Gpu_DebugArea(int *a) { a[0] = st.x0; a[1] = st.y0; a[2] = st.x1; a[3] = st
 
 void Draw_ResetBuffer(void) {}
 void Draw_FlushBuffer(void) {}
-int Draw_ExequeSync(void) { return 0; }
+/* DrawSync(): everything queued has been drawn */
+int Draw_ExequeSync(void) {
+    /* useful work while core 1 finishes the frame: mix the audio now
+     * instead of after VSync */
+    extern void Audio_FrameFill(void);
+    if (gq_head != gq_tail || gq_exec) Audio_FrameFill();
+    gpu_fence_c(0);
+    return 0;
+}

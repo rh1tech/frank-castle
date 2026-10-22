@@ -51,7 +51,7 @@ SECTIONS
          * FLASH ... we will include any thing excluded here in .data below by default */
         *(.init)
         *libgcc.a:cmse_nonsecure_call.o
-        *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a:) .text*)
+        *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a: *psyz_spu.c.o *gpu_fast.c.o) .text*)
         *(.fini)
         /* Pull all c'tors into .text */
         *crtbegin.o(.ctors)
@@ -190,7 +190,9 @@ SECTIONS
 
         *(.time_critical*)
 
-        /* remaining .text and .rodata; i.e. stuff we exclude above because we want it in RAM */
+        /* remaining .text and .rodata; i.e. stuff we exclude above because we want it in RAM.
+         * frank-castle: the SPU emulator and the GPU shell run from SRAM -- from
+         * flash they stall on an XIP cache that PSRAM traffic keeps thrashing. */
         *(.text*)
         . = ALIGN(4);
         *(.rodata*)

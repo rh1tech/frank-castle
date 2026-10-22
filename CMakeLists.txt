@@ -192,6 +192,12 @@ add_library(psyz_core OBJECT ${PSYZ_CORE_SOURCES}
 sotn_target_setup(psyz_core)
 # psyz's decomp/libgpu/sys.c uses printf without including stdio.h
 target_compile_options(psyz_core PRIVATE -include stdio.h)
+# SPU reverb reads/writes its work area in SPU RAM (PSRAM) dozens of times per
+# sample: ~10% of the game core. Off by default.
+option(CASTLE_SPU_REVERB "Emulate SPU reverb (costs ~2 ms per frame)" OFF)
+if(NOT CASTLE_SPU_REVERB)
+    target_compile_definitions(psyz_core PRIVATE PSYZ_SPU_NO_REVERB)
+endif()
 
 add_custom_target(sotn_overlays)
 foreach(ovl ${SOTN_OVERLAYS})
@@ -215,6 +221,7 @@ add_executable(frank-castle
     src/psyz_rp2350/audio.c
     src/psyz_rp2350/platform.c
     src/psyz_rp2350/module_static.c
+    src/rp2350/profiler.c
     ${CMAKE_BINARY_DIR}/castle_modules.c
     $<TARGET_OBJECTS:sotn_core>
     $<TARGET_OBJECTS:psyz_core>
@@ -226,6 +233,10 @@ target_include_directories(frank-castle PRIVATE
     ${SOTN_DIR}/src/pc
     src/psyz_rp2350
 )
+set(CASTLE_PROFILE "0" CACHE STRING "Sample PCs and dump them on the UART: 0 off, 1 core 0, 2 core 1")
+if(NOT CASTLE_PROFILE STREQUAL "0" AND NOT CASTLE_PROFILE STREQUAL "OFF")
+    target_compile_definitions(frank-castle PRIVATE CASTLE_PROFILE=${CASTLE_PROFILE})
+endif()
 set(CASTLE_ARGS "" CACHE STRING "Default extra game arguments, e.g. --stage nz0 (/castle/args.txt overrides)")
 target_compile_definitions(frank-castle PRIVATE ${SOTN_DEFINES} CASTLE_ARGS="${CASTLE_ARGS}")
 target_compile_options(frank-castle PRIVATE -fno-short-enums -funsigned-char

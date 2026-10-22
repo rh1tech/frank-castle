@@ -32,14 +32,14 @@ static short s11(short v) { return (short)(((v & 0x7FF) ^ 1024) - 1024); }
 #ifndef WARNF
 #define WARNF(...)
 #endif
-void Draw_SetTexpageMode(ParamDrawTexpageMode* p) {
+static void soft_set_texpage_mode(ParamDrawTexpageMode* p) {
     cur_tpage = (*(unsigned short*)p) & 0x1FF;
 }
-void Draw_SetTextureWindow(unsigned int mask_x, unsigned int mask_y,
+static void soft_set_texture_window(unsigned int mask_x, unsigned int mask_y,
                            unsigned int off_x, unsigned int off_y) {
     (void)mask_x; (void)mask_y; (void)off_x; (void)off_y;
 }
-void Draw_SetMask(int bit0, int bit1) { (void)bit0; (void)bit1; }
+static void soft_set_mask(int bit0, int bit1) { (void)bit0; (void)bit1; }
 #endif // SOFT_RASTER_STANDALONE
 
 // ==================== core (SDL-free, ESP32-ready) ====================
@@ -946,15 +946,15 @@ static int soft_push_prim(u_long* packets, int max_len) {
 
 // ---- Draw_* state ----------------------------------------------------------
 
-void Draw_SetAreaStart(int x, int y) {
+static void soft_set_area_start(int x, int y) {
     st.x0 = x;
     st.y0 = y;
 }
-void Draw_SetAreaEnd(int x, int y) {
+static void soft_set_area_end(int x, int y) {
     st.x1 = x;
     st.y1 = y;
 }
-void Draw_SetOffset(int x, int y) {
+static void soft_set_offset(int x, int y) {
     x = x % VRAM_W;
     y = y % VRAM_H;
     if (x < 0) {

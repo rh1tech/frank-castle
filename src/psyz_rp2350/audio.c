@@ -5,10 +5,10 @@
  * https://github.com/rh1tech/frank-castle
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Core 1 runs the SPU emulator in small chunks between scanout row copies and
- * pushes 44.1 kHz stereo frames into a ring; the I2S DMA IRQ only copies
- * from the ring. That IRQ is on core 0: sharing core 1 with the HSTX IRQ
- * breaks the HDMI timing.
+ * The game core runs the SPU emulator once per VSync (Audio_FrameFill) and
+ * pushes 44.1 kHz stereo frames into a ring; the I2S DMA IRQ (also core 0:
+ * sharing core 1 with the HSTX IRQ breaks the HDMI timing) only copies from
+ * the ring. Core 1 is left to the scanout and the rasterizer.
  *
  * Psyz_SpuPullSamples() also advances the root counters, whose handlers are
  * the game's sound driver and must run on the game thread. Psyz_RcntAdd is
@@ -47,9 +47,7 @@ static volatile int32_t pending_rcnt;
 
 void __wrap_Psyz_RcntAdd(int n) {
     if (get_core_num() == 1) {
-        uint32_t s = save_and_disable_interrupts();
-        pending_rcnt += n;
-        restore_interrupts(s);
+        __atomic_fetch_add(&pending_rcnt, n, __ATOMIC_RELAXED);
     } else {
         __real_Psyz_RcntAdd(n);
     }
@@ -88,6 +86,31 @@ void Audio_Init(void) {
     i2s_init(&cfg);
     i2s_set_fill_callback(i2s_fill);
     i2s_start();
+}
+
+/* Game core, once per VSync: top the ring up to AUDIO_TARGET frames. Mixing
+ * here keeps core 1 free for scanout and rasterizing, and the root counter
+ * handlers fire on the game thread as they should. */
+#define AUDIO_TARGET 2048 /* ~46 ms buffered */
+void Audio_FrameFill(void) {
+    static short buf[256 * 2];
+    extern volatile bool psyz_audio_ready;
+    if (!psyz_audio_ready) return;
+    for (;;) {
+        uint32_t level = ring_wr - ring_rd;
+        if (level >= AUDIO_TARGET) break;
+        uint32_t n = AUDIO_TARGET - level;
+        if (n > 256) n = 256;
+        Psyz_AudioLock();
+        Psyz_SpuPullSamples(buf, (int)n);
+        Psyz_AudioUnlock();
+        uint32_t wr = ring_wr;
+        for (uint32_t i = 0; i < n; i++)
+            ring[(wr + i) & (RING_FRAMES - 1)] = (uint16_t)buf[2 * i] | ((uint32_t)(uint16_t)buf[2 * i + 1] << 16);
+        __dmb();
+        ring_wr = wr + n;
+        audio_running = true;
+    }
 }
 
 /* Mix one chunk if the ring has room. Returns true if it did work. */

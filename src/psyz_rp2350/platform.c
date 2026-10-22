@@ -16,7 +16,7 @@
 #include <romio.h>
 
 #include "ff.h"
-#include "pico/mutex.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
 
 #include <stdarg.h>
@@ -122,9 +122,49 @@ void ResetPlatform(void) {}
 /* Audio lock. The SPU state is shared between the game and the mixer. */
 /* ------------------------------------------------------------------ */
 
-/* initialised before main(): core 1 may take it before the game inits audio */
-auto_init_recursive_mutex(audio_mutex);
-volatile bool psyz_audio_ready; /* the mixer on core 1 waits for this */
+/* SPU lock shared by the game (core 0) and the mixer (core 1). A plain SRAM
+ * word taken with compare-and-swap: unlike a pico mutex it never masks
+ * interrupts, which on core 1 would delay the HSTX IRQ and desync HDMI.
+ * Core 0 may nest (the game calls SPU code from SPU code); core 1 only tries. */
+static volatile uint32_t spu_owner; /* 0 free, else core number + 1 */
+static uint32_t spu_depth;          /* nesting depth of the owner */
+volatile bool psyz_audio_ready;     /* the mixer on core 1 waits for this */
+
+static bool spu_try(uint32_t me) {
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(&spu_owner, &expected, me, false, __ATOMIC_ACQUIRE,
+                                    __ATOMIC_RELAXED)) {
+        spu_depth = 1;
+        return true;
+    }
+    return false;
+}
+
+/* re-entrant on the owning core: SPU code calls SPU code (the mixer pulls
+ * CD audio through Psyz_CdPullSamples, which locks again) */
+void Psyz_AudioLock(void) {
+    uint32_t me = get_core_num() + 1;
+    if (spu_owner == me) {
+        spu_depth++;
+        return;
+    }
+    while (!spu_try(me)) tight_loop_contents();
+}
+
+void Psyz_AudioUnlock(void) {
+    if (--spu_depth) return;
+    __atomic_store_n(&spu_owner, 0, __ATOMIC_RELEASE);
+}
+
+/* core 1 mixer: never block (scanout work shares that core) */
+bool Psyz_AudioTryLock(void) {
+    uint32_t me = get_core_num() + 1;
+    if (spu_owner == me) {
+        spu_depth++;
+        return true;
+    }
+    return spu_try(me);
+}
 
 int Psyz_AudioInit(void) {
     Psyz_AudioLock();
@@ -133,10 +173,6 @@ int Psyz_AudioInit(void) {
     psyz_audio_ready = true;
     return 0;
 }
-void Psyz_AudioLock(void) { recursive_mutex_enter_blocking(&audio_mutex); }
-/* core 1 mixer: never block (scanout copies share that core) */
-bool Psyz_AudioTryLock(void) { return recursive_mutex_try_enter(&audio_mutex, NULL); }
-void Psyz_AudioUnlock(void) { recursive_mutex_exit(&audio_mutex); }
 
 /* ------------------------------------------------------------------ */
 /* Pads: USB keyboard -> PS1 digital pad on port 1                     */

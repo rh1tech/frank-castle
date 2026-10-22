@@ -51,6 +51,10 @@ extern void Audio_Init(void);
 
 static void core1_main(void) {
     psxv_start();
+#if defined(CASTLE_PROFILE) && CASTLE_PROFILE == 2
+    extern void profiler_start(void);
+    profiler_start(); /* samples core 1: the IRQ lives on the core that enables it */
+#endif
     PsxVideo_Core1Loop();
 }
 
@@ -130,6 +134,10 @@ int main(void) {
     argc += read_extra_args(args_buf, sizeof(args_buf), argv + argc, 16 - argc - 1);
     argv[argc] = NULL;
 
+#if defined(CASTLE_PROFILE) && CASTLE_PROFILE == 1
+    extern void profiler_start(void);
+    profiler_start();
+#endif
     printf("starting game:");
     for (int i = 0; i < argc; i++) printf(" %s", argv[i]);
     printf("\n");

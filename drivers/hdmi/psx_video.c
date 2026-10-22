@@ -12,6 +12,7 @@
 #include "pico/stdlib.h"
 
 #include "hardware/clocks.h"
+#include "hardware/timer.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
@@ -103,6 +104,14 @@
 
 volatile uint32_t psxv_frame_count = 0;
 
+/* Self-healing: the ping-pong DMA cannot survive one IRQ serviced too late
+ * (the channels then run lines out of order and the sink loses sync for
+ * good). A frame period well under 16.7 ms means that happened: restart the
+ * output from the top of the frame. */
+volatile uint32_t psxv_resyncs;
+static uint32_t last_vsync_us;
+static bool resync_needed;
+
 // DVI mode: when true, disables all HDMI Data Islands (pure DVI output, no audio)
 // Some monitors have trouble syncing with HDMI Data Islands
 static bool dvi_mode = false; // Default to HDMI mode (full features with audio)
@@ -166,7 +175,12 @@ static uint32_t vblank_avi_infoframe[64], vblank_avi_infoframe_len;
 // HSTX Resync - Reset output to sync with input VSYNC
 // ============================================================================
 
-static void __attribute__((unused)) __scratch_x("") hstx_resync(void)
+static inline void __scratch_x("") set_dma_size(dma_channel_hw_t *ch, uint32_t size)
+{
+    hw_write_masked(&ch->al1_ctrl, size << DMA_CH0_CTRL_TRIG_DATA_SIZE_LSB, DMA_CH0_CTRL_TRIG_DATA_SIZE_BITS);
+}
+
+static void __scratch_x("") hstx_resync(void)
 {
     // 1. Abort DMA chains
     dma_channel_abort(DMACH_PING);
@@ -178,8 +192,8 @@ static void __attribute__((unused)) __scratch_x("") hstx_resync(void)
     // Small delay to ensure HSTX fully stops
     __asm volatile("nop\nnop\nnop\nnop");
 
-    // 3. Reset state to start of frame
-    v_scanline = 0;
+    // 3. Reset state to start of frame (two blank lines are queued below)
+    v_scanline = 2;
     vactive_cmdlist_posted = false;
     dma_pong = false;
 
@@ -188,6 +202,8 @@ static void __attribute__((unused)) __scratch_x("") hstx_resync(void)
 
     // 5. Configure DMA PING to start from beginning of frame (Line 0)
     dma_channel_hw_t *ch_ping = &dma_hw->ch[DMACH_PING];
+    set_dma_size(ch_ping, DMA_SIZE_32);
+    set_dma_size(&dma_hw->ch[DMACH_PONG], DMA_SIZE_32);
     ch_ping->read_addr = (uintptr_t)vblank_line_vsync_off;
     ch_ping->transfer_count = count_of(vblank_line_vsync_off);
 
@@ -202,10 +218,6 @@ static void __attribute__((unused)) __scratch_x("") hstx_resync(void)
     dma_channel_start(DMACH_PING);
 }
 
-static inline void __scratch_x("") set_dma_size(dma_channel_hw_t *ch, uint32_t size)
-{
-    hw_write_masked(&ch->al1_ctrl, size << DMA_CH0_CTRL_TRIG_DATA_SIZE_LSB, DMA_CH0_CTRL_TRIG_DATA_SIZE_BITS);
-}
 
 // ============================================================================
 // Internal Helpers
@@ -298,6 +310,11 @@ static inline void __scratch_x("") video_output_handle_vsync(dma_channel_hw_t *c
         ch->transfer_count = count_of(vblank_line_vsync_on);
         if (v_scanline == MODE_V_FRONT_PORCH) {
             psxv_frame_count++;
+            {
+                uint32_t now = timer_hw->timerawl;
+                if (last_vsync_us && now - last_vsync_us < 14000) resync_needed = true;
+                last_vsync_us = now;
+            }
             if (vsync_callback)
                 vsync_callback();
         }
@@ -306,6 +323,11 @@ static inline void __scratch_x("") video_output_handle_vsync(dma_channel_hw_t *c
             ch->read_addr = (uintptr_t)vblank_acr_vsync_on;
             ch->transfer_count = vblank_acr_vsync_on_len;
             psxv_frame_count++;
+            {
+                uint32_t now = timer_hw->timerawl;
+                if (last_vsync_us && now - last_vsync_us < 14000) resync_needed = true;
+                last_vsync_us = now;
+            }
             if (vsync_callback)
                 vsync_callback();
         } else {
@@ -391,7 +413,16 @@ static inline void __scratch_x("") video_output_handle_active_data(dma_channel_h
 // DMA IRQ Handler
 // ============================================================================
 
+volatile uint32_t psxv_irq_us; /* time spent in this IRQ (diagnostic) */
+static void __scratch_x("") dma_irq_handler_body(void);
 static void __scratch_x("") dma_irq_handler(void)
+{
+    uint32_t t0 = timer_hw->timerawl;
+    dma_irq_handler_body();
+    psxv_irq_us += timer_hw->timerawl - t0;
+}
+
+static void __scratch_x("") dma_irq_handler_body(void)
 {
     uint32_t ch_num = dma_pong ? DMACH_PONG : DMACH_PING;
     dma_channel_hw_t *ch = &dma_hw->ch[ch_num];
@@ -401,6 +432,14 @@ static void __scratch_x("") dma_irq_handler(void)
     // Advance audio/data-island scheduler exactly once per scanline (HDMI mode only)
     if (!dvi_mode && !vactive_cmdlist_posted) {
         hstx_di_queue_tick();
+    }
+
+    if (resync_needed) {
+        resync_needed = false;
+        psxv_resyncs++;
+        last_vsync_us = 0;
+        hstx_resync();
+        return;
     }
 
     scanline_state_t state;

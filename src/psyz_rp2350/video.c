@@ -109,10 +109,19 @@ bool __attribute__((weak)) Psyz_DisplayOrigin(int *x, int *y) {
     return false;
 }
 
+/* Display origin supplied by the game (Psyz_DisplayOrigin), sampled on the
+ * game core at VSync: the scanout IRQ must not run flash code or touch
+ * PSRAM, a stall there desyncs the HDMI DMA. */
+static volatile int game_disp_x, game_disp_y;
+static volatile bool game_disp_valid;
+
 static void __not_in_flash_func(latch_frame)(void) {
     int w = disp_w;
     int ox = disp_x, oy = disp_y;
-    Psyz_DisplayOrigin(&ox, &oy);
+    if (game_disp_valid) {
+        ox = game_disp_x;
+        oy = game_disp_y;
+    }
     frame_on = disp_on;
     frame_x = ox & (VRAM_W - 1);
     frame_y = oy & (VRAM_H - 1);
@@ -199,9 +208,9 @@ void __not_in_flash_func(PsxVideo_Core1Loop)(void) {
         uint32_t seq = frame_seq;
         int row = fill_row;
         if (!frame_on || row >= PSXV_OUT_H / 2 || row > beam_row + FILL_AHEAD) {
-            /* scanout is ahead (or idle): mix a chunk of audio */
-            extern bool Audio_Core1Poll(void);
-            if (!Audio_Core1Poll()) tight_loop_contents();
+            /* scanout is ahead (or idle): rasterize, then mix audio */
+            extern bool Gpu_Core1Work(uint32_t budget_us);
+            if (!Gpu_Core1Work(150)) tight_loop_contents();
             continue;
         }
         int y = (frame_y + row) & (VRAM_H - 1);
@@ -236,6 +245,7 @@ static uint64_t last_vsync_us;
 /* Frame statistics, logged every 2 s: game time per frame excluding the
  * vsync wait, worst frame, and frames actually presented per second. */
 static uint64_t stat_t0, stat_work_us, stat_spu_us;
+extern volatile uint32_t psxv_resyncs;
 extern volatile uint32_t gpu_prim_us, gpu_vram_us, gpu_prims, gpu_shadow_us, audio_underruns, audio_chunk_max_us;
 static uint32_t stat_frames, stat_worst_us;
 
@@ -247,7 +257,7 @@ static void frame_stats(uint64_t work_us) {
     if (!stat_t0) {
         stat_t0 = now;
     } else if (now - stat_t0 >= 2000000) {
-        printf("[perf] %lu fps, game %lu us avg / %lu worst | raster %lu us (%lu prims) vram %lu us shadow %lu us rcnt %lu us | late rows %lu, audio underruns %lu, mix step max %lu us, scan sram/psram %lu/%lu, disp %d,%d\n",
+        printf("[perf] %lu fps, game %lu us avg / %lu worst | raster %lu us (%lu prims) vram %lu us shadow %lu us spu %lu us | late rows %lu, audio underruns %lu, mix step max %lu us, scan sram/psram %lu/%lu, disp %d,%d, hdmi resyncs %lu\n",
                (unsigned long)(stat_frames * 1000000ull / (now - stat_t0)),
                (unsigned long)(stat_work_us / stat_frames), (unsigned long)stat_worst_us,
                (unsigned long)(gpu_prim_us / stat_frames), (unsigned long)(gpu_prims / stat_frames),
@@ -255,12 +265,37 @@ static void frame_stats(uint64_t work_us) {
                (unsigned long)(stat_spu_us / stat_frames),
                (unsigned long)psxv_late_rows, (unsigned long)audio_underruns,
                (unsigned long)audio_chunk_max_us, (unsigned long)scan_sram, (unsigned long)scan_psram,
-               frame_x, frame_y);
+               frame_x, frame_y, (unsigned long)psxv_resyncs);
         scan_sram = scan_psram = 0;
         extern void Gpu_DebugArea(int *a);
         int a[6];
         Gpu_DebugArea(a);
-        printf("[perf] draw area %d,%d..%d,%d ofs %d,%d\n", a[0], a[1], a[2], a[3], a[4], a[5]);
+        extern volatile uint32_t gpu_flush_cause[5];
+        extern volatile uint32_t gpu_fence_us;
+        extern volatile uint32_t psxv_irq_us, gpu_busy_us;
+        printf("[perf] gpu fence wait %lu us/frame, core1: hdmi irq %lu%%, gpu work %lu%%\n",
+               (unsigned long)(gpu_fence_us / stat_frames), (unsigned long)(psxv_irq_us / 20000),
+               (unsigned long)(gpu_busy_us / 20000));
+        extern volatile uint32_t gpu_fence_by[6];
+        printf("[perf] fence by sync/display/load/store/reset/other %lu/%lu/%lu/%lu/%lu/%lu us/frame\n",
+               (unsigned long)(gpu_fence_by[0] / stat_frames), (unsigned long)(gpu_fence_by[1] / stat_frames),
+               (unsigned long)(gpu_fence_by[2] / stat_frames), (unsigned long)(gpu_fence_by[3] / stat_frames),
+               (unsigned long)(gpu_fence_by[4] / stat_frames), (unsigned long)(gpu_fence_by[5] / stat_frames));
+        for (int k = 0; k < 6; k++) gpu_fence_by[k] = 0;
+        gpu_fence_us = 0;
+        psxv_irq_us = 0;
+        gpu_busy_us = 0;
+        printf("[perf] slot flush tex/read/write/evict %lu/%lu/%lu/%lu, loads %lu\n",
+               (unsigned long)gpu_flush_cause[0], (unsigned long)gpu_flush_cause[1],
+               (unsigned long)gpu_flush_cause[2], (unsigned long)gpu_flush_cause[3],
+               (unsigned long)gpu_flush_cause[4]);
+        for (int k = 0; k < 5; k++) gpu_flush_cause[k] = 0;
+        extern volatile int gpu_last_alloc[4];
+        extern volatile int gpu_allocs[8][5], gpu_alloc_n;
+        for (int k = 0; k < gpu_alloc_n; k++)
+            printf("[perf] slot alloc %d,%d %dx%d x%d\n", gpu_allocs[k][0], gpu_allocs[k][1],
+                   gpu_allocs[k][2], gpu_allocs[k][3], gpu_allocs[k][4]);
+        gpu_alloc_n = 0;
         audio_chunk_max_us = 0;
         gpu_prim_us = gpu_vram_us = gpu_prims = gpu_shadow_us = 0;
         stat_spu_us = 0;
@@ -278,13 +313,23 @@ int Psyz_VideoVSync(int mode) {
     if (mode == 0) {
         extern void Gpu_FlushForDisplay(void);
         Gpu_FlushForDisplay();
+        int gx, gy;
+        if (Psyz_DisplayOrigin(&gx, &gy)) {
+            game_disp_x = gx;
+            game_disp_y = gy;
+            game_disp_valid = true;
+        }
         /* the SPU is mixed on core 1 (audio.c); its root counter ticks are
          * replayed here, on the game thread */
-        extern void Audio_DrainRcnt(void);
+        extern void Audio_FrameFill(void);
         uint64_t t_spu = time_us_64();
-        Audio_DrainRcnt();
+        Audio_FrameFill();
         stat_spu_us += time_us_64() - t_spu;
         frame_stats(time_us_64() - last_vsync_us);
+#ifdef CASTLE_PROFILE
+        extern void profiler_poll(void);
+        profiler_poll();
+#endif
         if (vsync_mode != PSYZ_VSYNC_LIMITLESS && vsync_mode != PSYZ_VSYNC_OFF) {
             uint32_t now = vblank_count;
             while (vblank_count == now) tight_loop_contents();
