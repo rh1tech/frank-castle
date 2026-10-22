@@ -409,6 +409,8 @@ void __not_in_flash_func(PsxVideo_Core1Loop)(void) {
 
 static PsyzVsyncMode vsync_mode = PSYZ_VSYNC_AUTO;
 static uint64_t last_vsync_us;
+volatile uint32_t psxv_vsync_ret_us; /* time_us_32 when VSync last returned */
+static uint32_t vsync_entry_at_us, vsync_late, vsync_calls; /* timeline (perf log) */
 
 
 /* Frame statistics, logged every 2 s: game time per frame excluding the
@@ -455,6 +457,20 @@ static void frame_stats(uint64_t work_us) {
         printf("[perf] gpu fence wait %lu us/frame, core1: hdmi irq %lu%%, gpu work %lu%%\n",
                (unsigned long)(gpu_fence_us / stat_frames), (unsigned long)(psxv_irq_us / 20000),
                (unsigned long)(gpu_busy_us / 20000));
+        extern volatile uint32_t gpu_sync_at_us, gpu_drain_at_us, gpu_tl_frames;
+        if (gpu_tl_frames)
+            printf("[perf] timeline from VSync: DrawSync at %lu us, core 1 drained at %lu us, VSync entered at %lu us (avg), %lu late, %lu VSync / %lu DrawSync\n",
+                   (unsigned long)(gpu_sync_at_us / gpu_tl_frames), (unsigned long)(gpu_drain_at_us / gpu_tl_frames),
+                   (unsigned long)(vsync_entry_at_us / (vsync_calls ? vsync_calls : 1)), (unsigned long)vsync_late,
+                   (unsigned long)vsync_calls, (unsigned long)gpu_tl_frames);
+        vsync_entry_at_us = vsync_late = vsync_calls = 0;
+        gpu_sync_at_us = gpu_drain_at_us = gpu_tl_frames = 0;
+        extern volatile uint32_t ds_site_pc[8], ds_site_n[8], ds_site_us[8];
+        for (int i = 0; i < 8 && ds_site_pc[i]; i++) {
+            printf("[perf] DrawSync from %08lx: %lu calls, %lu us waited\n", (unsigned long)ds_site_pc[i],
+                   (unsigned long)ds_site_n[i], (unsigned long)ds_site_us[i]);
+            ds_site_n[i] = ds_site_us[i] = 0;
+        }
         extern volatile uint32_t audio_peak;
         extern unsigned psyz_xa_sectors, psyz_xa_stride_hits;
         printf("[perf] audio peak %lu, XA sectors %u (stride hits %u)\n", (unsigned long)audio_peak,
@@ -499,6 +515,9 @@ int Psyz_VideoVSync(int mode) {
     /* horizontal lines since the last vsync, 63.5 us each (NTSC) */
     int lines = (int)(((time_us_64() - last_vsync_us) * 2) / 127) & 0xFFFF;
     if (mode == 0) {
+        vsync_entry_at_us += time_us_32() - psxv_vsync_ret_us;
+        vsync_calls++;
+        vsync_late += (time_us_64() - last_vsync_us) > 16600;
         extern void Gpu_FlushForDisplay(void);
         Gpu_FlushForDisplay();
         int gx, gy;
@@ -523,6 +542,7 @@ int Psyz_VideoVSync(int mode) {
             while (vblank_count == now) tight_loop_contents();
         }
         last_vsync_us = time_us_64();
+        psxv_vsync_ret_us = (uint32_t)last_vsync_us;
     }
     return lines;
 }

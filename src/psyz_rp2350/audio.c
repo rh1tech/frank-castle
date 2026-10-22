@@ -89,36 +89,53 @@ void Audio_Init(void) {
     i2s_start();
 }
 
-/* Game core, once per VSync: top the ring up to AUDIO_TARGET frames. Mixing
- * here keeps core 1 free for scanout and rasterizing, and the root counter
- * handlers fire on the game thread as they should. */
-#define AUDIO_TARGET 3072 /* ~70 ms buffered: menus run at ~20 fps */
-void Audio_FrameFill(void) {
+/* Game core. Mixing is spread so it never sits on the frame's critical
+ * path: DrawSync mixes in small steps for as long as core 1 is still
+ * drawing (time the game would only spend waiting), and VSync tops up only
+ * when the ring runs low. The root counter handlers (the sound driver) fire
+ * on the game thread, as they should. */
+#define AUDIO_HIGH 3584 /* ~81 ms: DrawSync fills up to here while waiting */
+#define AUDIO_LOW 1536  /* ~35 ms: below this VSync tops up */
+
+/* Mix up to 256 frames if the ring holds fewer than target. Returns true if
+ * it mixed. */
+bool Audio_FillStep(uint32_t target) {
     static short buf[256 * 2];
     extern volatile bool psyz_audio_ready;
-    if (!psyz_audio_ready) return;
-    for (;;) {
-        uint32_t level = ring_wr - ring_rd;
-        if (level >= AUDIO_TARGET) break;
-        uint32_t n = AUDIO_TARGET - level;
-        if (n > 256) n = 256;
-        Psyz_AudioLock();
-        Psyz_SpuPullSamples(buf, (int)n);
-        Psyz_AudioUnlock();
-        uint32_t wr = ring_wr;
-        uint32_t peak = audio_peak;
-        for (uint32_t i = 0; i < n; i++) {
-            int l = buf[2 * i], r = buf[2 * i + 1];
-            uint32_t m = (uint32_t)(l < 0 ? -l : l) | (uint32_t)(r < 0 ? -r : r);
-            if (m > peak) peak = m;
-            ring[(wr + i) & (RING_FRAMES - 1)] = (uint16_t)l | ((uint32_t)(uint16_t)r << 16);
-        }
-        audio_peak = peak;
-        __dmb();
-        ring_wr = wr + n;
-        audio_running = true;
+    if (!psyz_audio_ready) return false;
+    uint32_t level = ring_wr - ring_rd;
+    if (level >= target) return false;
+    uint32_t n = target - level;
+    if (n > 256) n = 256;
+    Psyz_AudioLock();
+    Psyz_SpuPullSamples(buf, (int)n);
+    Psyz_AudioUnlock();
+    uint32_t wr = ring_wr;
+    uint32_t peak = audio_peak;
+    for (uint32_t i = 0; i < n; i++) {
+        int l = buf[2 * i], r = buf[2 * i + 1];
+        uint32_t m = (uint32_t)(l < 0 ? -l : l) | (uint32_t)(r < 0 ? -r : r);
+        if (m > peak) peak = m;
+        ring[(wr + i) & (RING_FRAMES - 1)] = (uint16_t)l | ((uint32_t)(uint16_t)r << 16);
+    }
+    audio_peak = peak;
+    __dmb();
+    ring_wr = wr + n;
+    audio_running = true;
+    return true;
+}
+
+uint32_t Audio_Level(void) { return ring_wr - ring_rd; }
+
+/* VSync: emergency top-up only (the DrawSync wait normally keeps it full). */
+void Audio_FrameFill(void) {
+    if (ring_wr - ring_rd >= AUDIO_LOW) return;
+    while (Audio_FillStep(AUDIO_LOW + 512)) {
     }
 }
+
+/* DrawSync, while core 1 is still busy: one step towards AUDIO_HIGH. */
+bool Audio_IdleFill(void) { return Audio_FillStep(AUDIO_HIGH); }
 
 /* Mix one chunk if the ring has room. Returns true if it did work. */
 bool __not_in_flash_func(Audio_Core1Poll)(void) {

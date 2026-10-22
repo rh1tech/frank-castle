@@ -436,6 +436,11 @@ static void exec_move(PS1_RECT *rect, int x, int y) {
     TIMED(soft_move_image(rect, x, y));
 }
 
+/* frame timeline (perf log): offsets from the last VSync return */
+volatile uint32_t gpu_sync_at_us, gpu_drain_at_us, gpu_tl_frames;
+static volatile uint32_t drain_last;
+extern volatile uint32_t psxv_vsync_ret_us;
+
 /* Run queued commands for up to budget_us. Returns true if it did work. */
 volatile uint32_t gpu_busy_us; /* core 1 time in Gpu_Core1Work (diagnostic) */
 bool __not_in_flash_func(Gpu_Core1Work)(uint32_t budget_us) {
@@ -475,6 +480,7 @@ bool __not_in_flash_func(Gpu_Core1Work)(uint32_t budget_us) {
         gq_exec = false;
     } while (gq_head != gq_tail && time_us_32() - t0 < budget_us);
     gpu_c1_state = 0;
+    if (gq_head == gq_tail) drain_last = time_us_32() - psxv_vsync_ret_us;
     gpu_busy_us += time_us_32() - t0;
     return true;
 }
@@ -602,11 +608,46 @@ void Gpu_DebugArea(int *a) { a[0] = st.x0; a[1] = st.y0; a[2] = st.x1; a[3] = st
 void Draw_ResetBuffer(void) {}
 void Draw_FlushBuffer(void) {}
 /* DrawSync(): everything queued has been drawn */
+/* Who calls DrawSync, and how long each call site waits (perf log): a
+ * DrawSync early in the frame stalls the game until core 1 has finished the
+ * previous frame, which removes the logic/raster overlap. */
+#define DS_SITES 8
+static volatile bool in_drawsync;
+volatile uint32_t ds_site_pc[DS_SITES], ds_site_n[DS_SITES], ds_site_us[DS_SITES];
+extern int __real_DrawSync(int mode);
+int __wrap_DrawSync(int mode) {
+    uint32_t pc = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    uint32_t t = time_us_32();
+    in_drawsync = true;
+    int r = __real_DrawSync(mode);
+    in_drawsync = false;
+    uint32_t dt = time_us_32() - t;
+    for (int i = 0; i < DS_SITES; i++) {
+        if (ds_site_pc[i] == pc || ds_site_pc[i] == 0) {
+            ds_site_pc[i] = pc;
+            ds_site_n[i]++;
+            ds_site_us[i] += dt;
+            break;
+        }
+    }
+    return r;
+}
+
 int Draw_ExequeSync(void) {
+    /* psyz also calls this from LoadImage/ClearImage/MoveImage to flush its
+     * own packet queue. Our ring keeps every command in order and copies its
+     * data, and StoreImage fences by itself, so only a real DrawSync has to
+     * wait: fencing on every texture/palette upload made the game wait for
+     * core 1 to finish the previous frame mid-logic. */
+    if (!in_drawsync) return 0;
+    gpu_sync_at_us += time_us_32() - psxv_vsync_ret_us;
+    gpu_tl_frames++;
     /* useful work while core 1 finishes the frame: mix the audio now
      * instead of after VSync */
-    extern void Audio_FrameFill(void);
-    if (gq_head != gq_tail || gq_exec) Audio_FrameFill();
+    extern bool Audio_IdleFill(void);
+    while ((gq_head != gq_tail || gq_exec) && Audio_IdleFill()) {
+    }
     gpu_fence_c(0);
+    gpu_drain_at_us += drain_last;
     return 0;
 }

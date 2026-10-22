@@ -255,6 +255,7 @@ target_link_options(frank-castle PRIVATE
     -Wl,--no-enum-size-warning
     -Wl,--wrap=panic
     -Wl,--wrap=Psyz_RcntAdd
+    -Wl,--wrap=DrawSync
     -Wl,--print-memory-usage
 )
 set_property(TARGET frank-castle APPEND PROPERTY LINK_DEPENDS

@@ -9,7 +9,7 @@ UF2=${1:-build/frank-castle.uf2}
 cd "$(dirname "$0")/.."
 if ! picotool info >/dev/null 2>&1; then
     python3 tools/uart.py bootsel
-    for i in $(seq 1 50); do
+    for i in $(seq 1 150); do
         picotool info >/dev/null 2>&1 && break
         sleep 0.2
     done
