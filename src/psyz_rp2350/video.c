@@ -63,7 +63,7 @@ static volatile int frame_sram_stride, frame_sram_r0, frame_sram_r1;
  * XIP cache, never by DMA: all DMA channels share one bus master, and a PSRAM
  * read stalled behind the game's own traffic would also stall the HSTX
  * channel and break HDMI timing. The HSTX IRQ only touches SRAM. */
-#define NBUF 16
+#define NBUF 14
 static uint16_t line_buf[NBUF][PSXV_OUT_W] __attribute__((aligned(4)));
 static uint16_t black_line[PSXV_OUT_W] __attribute__((aligned(4)));
 static volatile uint32_t vblank_count;
@@ -562,6 +562,12 @@ static void frame_stats(uint64_t work_us) {
         PV("[perf] texture row fetches %lu/frame, waiting %lu us/frame\n", (unsigned long)(tex_fetches / stat_frames),
            (unsigned long)(tex_wait_us / stat_frames));
         tex_fetches = tex_wait_us = 0;
+        {
+            extern int soft_semi_log[6][5], soft_semi_logged;
+            for (int k = 0; k < soft_semi_logged; k++)
+                PV("[perf] big semi sprite: bpp %d %dx%d colour %06x abr %d\n", soft_semi_log[k][0],
+                   soft_semi_log[k][1], soft_semi_log[k][2], soft_semi_log[k][3], soft_semi_log[k][4]);
+        }
         extern volatile uint32_t ds_site_pc[8], ds_site_n[8], ds_site_us[8];
         for (int i = 0; i < 8 && ds_site_pc[i]; i++) {
             PV("[perf] DrawSync from %08lx: %lu calls, %lu us waited\n", (unsigned long)ds_site_pc[i],
@@ -655,9 +661,15 @@ int Psyz_VideoVSync(int mode) {
             }
         }
         if (vsync_mode != PSYZ_VSYNC_LIMITLESS && vsync_mode != PSYZ_VSYNC_OFF) {
+            /* wide modes: write the finished frame to PSRAM while waiting;
+             * core 1 takes over whatever is left at the vblank */
+            extern bool Gpu_FlushStep(void);
             uint32_t now = vblank_count;
-            while (vblank_count == now) tight_loop_contents();
+            while (vblank_count == now)
+                if (!Gpu_FlushStep()) tight_loop_contents();
         }
+        extern void Gpu_FlushHandOff(void);
+        Gpu_FlushHandOff();
         last_vsync_us = time_us_64();
         psxv_vsync_ret_us = (uint32_t)last_vsync_us;
         extern void platform_usb_poll(void);

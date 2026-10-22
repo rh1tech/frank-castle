@@ -160,14 +160,9 @@ static inline uint32_t row_hash(const u16 *p, int n) {
 /* Slot rows go to PSRAM by CPU stores. Not by DMA: a DMA channel writing
  * PSRAM stalls the DMA master on every write and the HSTX channels with it
  * (tried: 2.5x faster copy, no HDMI signal). */
-static void slot_flush_c(Slot *s, int cause) {
-    if (!s->used || !s->dirty || !s->loaded) return;
-    uint8_t prev_state = gpu_c1_state;
-    gpu_c1_state = 2;
-    gpu_flush_cause[cause]++;
-    uint64_t t = time_us_64();
+static void flush_rows(Slot *s, int jfrom, int jto) {
     bool hashable = !(((uintptr_t)s->base) & 3) && !(s->sw & 1);
-    for (int j = 0; j < s->h; j++) {
+    for (int j = jfrom; j < jto; j++) {
         int vy = (s->y0 + j) & (VRAM_H - 1);
         u16 *row = g_PsxVram + vy * VRAM_PITCH + s->x0;
         const u16 *src = s->base + j * s->sw;
@@ -191,6 +186,31 @@ static void slot_flush_c(Slot *s, int cause) {
         flush_maint_us += c1 - c0;
         flush_copy_us += time_us_32() - c1;
     }
+}
+
+/* Display flush split across the frame boundary: core 0 flushes rows while
+ * it waits for vblank in VSync (Gpu_FlushStep), and whatever is left when
+ * the vblank comes is finished by core 1 before it draws anything else
+ * (Gpu_Core1FlushPending). Those are bottom rows; the beam reaches them
+ * ~8 ms later. Only one core flushes at a time: core 0 until it hands over
+ * (fl_core1), core 1 after. */
+static volatile int fl_slot = -1; /* slot whose display flush is in progress */
+static volatile int fl_next;      /* first row not flushed yet */
+static volatile bool fl_core1;    /* core 0 handed the rest to core 1 */
+
+static void slot_flush_c(Slot *s, int cause) {
+    if (!s->used || !s->dirty || !s->loaded) return;
+    uint8_t prev_state = gpu_c1_state;
+    gpu_c1_state = 2;
+    gpu_flush_cause[cause]++;
+    uint64_t t = time_us_64();
+    int start = 0;
+    if (fl_slot == (int)(s - slot)) { /* finish a display flush in progress */
+        start = fl_next;
+        fl_slot = -1;
+        fl_core1 = false;
+    }
+    flush_rows(s, start, s->h);
     s->dirty = false;
     gpu_shadow_us += (uint32_t)(time_us_64() - t);
     gpu_c1_state = prev_state;
@@ -527,9 +547,12 @@ volatile uint32_t gpu_last_sync_at, gpu_last_drain_at; /* this frame: DrawSync r
 static volatile uint32_t drain_last;
 extern volatile uint32_t psxv_vsync_ret_us;
 
+void Gpu_Core1FlushPending(void);
+
 /* Run queued commands for up to budget_us. Returns true if it did work. */
 volatile uint32_t gpu_busy_us; /* core 1 time in Gpu_Core1Work (diagnostic) */
 bool __not_in_flash_func(Gpu_Core1Work)(uint32_t budget_us) {
+    if (fl_core1) Gpu_Core1FlushPending();
     if (gq_head == gq_tail) return false;
     uint32_t t0 = time_us_32();
     static uint32_t w[64];
@@ -666,7 +689,46 @@ void Draw_StoreImage(PS1_RECT *rect, u_long *p) {
  * is scanned out from SRAM; a whole-area one must be in PSRAM. */
 void Gpu_FlushForDisplay(void) {
     gpu_fence_c(1); /* the frame about to be shown must be fully drawn */
-    if (slot[0].whole) slot_flush(&slot[0]);
+    Slot *s = &slot[0];
+    if (!s->whole || !s->used || !s->dirty || !s->loaded) return;
+    fl_next = 0;
+    fl_core1 = false;
+    fl_slot = 0;
+}
+
+/* Core 0, in VSync while waiting for vblank: flush one more row. Returns
+ * false when there is nothing (left) to flush. */
+bool Gpu_FlushStep(void) {
+    if (fl_slot < 0 || fl_core1) return false;
+    Slot *s = &slot[fl_slot];
+    uint64_t t = time_us_64();
+    flush_rows(s, fl_next, fl_next + 1);
+    gpu_shadow_us += (uint32_t)(time_us_64() - t);
+    if (++fl_next >= s->h) {
+        s->dirty = false;
+        fl_slot = -1;
+    }
+    return true;
+}
+
+/* Core 0, after the vblank: core 1 finishes what is left. */
+void Gpu_FlushHandOff(void) {
+    if (fl_slot < 0) return;
+    __dmb();
+    fl_core1 = true;
+}
+
+/* Core 1, before anything else: finish a handed-over display flush. */
+void __not_in_flash_func(Gpu_Core1FlushPending)(void) {
+    if (!fl_core1) return;
+    Slot *s = &slot[fl_slot];
+    uint64_t t = time_us_64();
+    flush_rows(s, fl_next, s->h);
+    s->dirty = false;
+    gpu_shadow_us += (uint32_t)(time_us_64() - t);
+    fl_slot = -1;
+    __dmb();
+    fl_core1 = false;
 }
 
 /* For the scanout (core 1, at latch time): if a loaded half slot holds the

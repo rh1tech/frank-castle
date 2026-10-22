@@ -205,6 +205,7 @@ typedef struct {
 } Tex;
 
 static unsigned soft_px; // pixels spanned (perf counters)
+int soft_semi_log[6][5], soft_semi_logged; // big semi-transparent sprites (diagnostic)
 
 static inline Tex tex_from(u16 tpage, u16 clut) {
     Tex t;
@@ -307,6 +308,7 @@ typedef struct {
     int semi, abr;
     const u16 *lr, *lg, *lb; // flat modulation tables (exactly mod5(c, col))
     int neutral;             // colour 0x808080: the tables are the identity
+    const uint32_t* mclut;   // modulated palette (sprites): colour | STP | 1<<16 if drawn
 } SpanCtx;
 
 // 4bpp: one halfword holds four texels; re-read it only when the sample
@@ -418,6 +420,26 @@ SOFT_RASTER_IRAM static void span_spr4(u16* dst, int n, int u, const u16* trow,
                                        const SpanCtx* c) {
     const u16 *clut = c->clut, *lr = c->lr, *lg = c->lg, *lb = c->lb;
     int semi = c->semi;
+    if (c->mclut) {
+        // modulated palette: one lookup per texel
+        const uint32_t* mc = c->mclut;
+        while (n > 0) {
+            u16 hw = TEX_RD(&trow[(u & 0xFF) >> 2]);
+            int sh = u & 3;
+            do {
+                uint32_t e = mc[(hw >> (sh * 4)) & 0xF];
+                if (e) {
+                    if (semi && (e & 0x8000)) *dst = blend555(*dst, (u16)e, c->abr);
+                    else *dst = (u16)e;
+                }
+                dst++;
+                u++;
+                n--;
+                sh++;
+            } while (sh < 4 && n > 0);
+        }
+        return;
+    }
     while (n > 0) {
         u16 hw = TEX_RD(&trow[(u & 0xFF) >> 2]);
         int sh = u & 3;
@@ -447,6 +469,19 @@ DEF_SPAN_SPR(span_spr15_gen, SPR_TEXEL15)
 // exactly what the general loop computes with identity tables.
 SOFT_RASTER_IRAM static void span_spr8(u16* dst, int n, int u, const u16* trow,
                                        const SpanCtx* c) {
+    if (c->mclut && (u & 0xFF) + n <= 256) {
+        // modulated palette: one lookup per texel, two texels per read
+        const uint32_t* mc = c->mclut;
+        int semi = c->semi;
+        u &= 0xFF;
+        for (; n > 0; n--, dst++, u++) {
+            uint32_t e = mc[(TEX_RD(&trow[u >> 1]) >> ((u & 1) * 8)) & 0xFF];
+            if (!e) continue;
+            if (semi && (e & 0x8000)) *dst = blend555(*dst, (u16)e, c->abr);
+            else *dst = (u16)e;
+        }
+        return;
+    }
     if (!c->neutral || c->semi || (u & 0xFF) + n > 256) {
         span_spr8_gen(dst, n, u, trow, c);
         return;
@@ -503,6 +538,14 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
     if (i0 > i1 || j0 > j1) {
         return;
     }
+    if (semi && (i1 - i0 + 1) * (j1 - j0 + 1) >= 4096 && soft_semi_logged < 6) {
+        soft_semi_log[soft_semi_logged][0] = t.bpp;
+        soft_semi_log[soft_semi_logged][1] = i1 - i0 + 1;
+        soft_semi_log[soft_semi_logged][2] = j1 - j0 + 1;
+        soft_semi_log[soft_semi_logged][3] = v->r | v->g << 8 | v->b << 16;
+        soft_semi_log[soft_semi_logged][4] = t.abr;
+        soft_semi_logged++;
+    }
     // Tilemap fast path: 4bpp, opaque, neutral modulation, u aligned to a
     // halfword. Four texels per source read, pixel pairs written as one
     // 32-bit store; texel 0 stays transparent, so the output is the same as
@@ -523,7 +566,22 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
         }
     }
     SpanCtx sc = {t.page, t.clut, 0, 0, 0, 0, 0, semi, t.abr, lr, lg, lb,
-                  v->r == 0x80 && v->g == 0x80 && v->b == 0x80};
+                  v->r == 0x80 && v->g == 0x80 && v->b == 0x80, 0};
+    if (!tile && !sc.neutral && t.bpp <= 1 && (i1 - i0 + 1) * (j1 - j0 + 1) >= 512) {
+        // Coloured palettised sprite (title/menu backdrops): modulate the
+        // palette once instead of every texel. Bit 16 marks entries that are
+        // drawn: transparency is decided by the raw texel, and a dark texel
+        // may modulate to exactly 0.
+        static uint32_t mclut[256];
+        int ncol = t.bpp == 0 ? 16 : 256;
+        for (int k = 0; k < ncol; k++) {
+            u16 tx = t.clut[k];
+            mclut[k] = tx ? (0x10000u | (tx & 0x8000) | lr[tx & 0x1F] | lg[(tx >> 5) & 0x1F] |
+                             lb[(tx >> 10) & 0x1F])
+                          : 0;
+        }
+        sc.mclut = mclut;
+    }
 #ifdef SOFT_ROW_FETCH
     // 8/15bpp rows (backdrops) come into SRAM in one burst each, the next
     // row fetched while this one is drawn, instead of a cache miss per four
@@ -899,7 +957,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
             lkey = key;
         }
         SpanCtx sc = {t.page, t.clut, udx, vdx, 0, 0, 0, semi, t.abr, lr, lg, lb,
-                      a->r == 0x80 && a->g == 0x80 && a->b == 0x80};
+                      a->r == 0x80 && a->g == 0x80 && a->b == 0x80, 0};
         for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
                  w2row += B2, urow += udy, vrow += vdy) {
             int xl = minx, xr = maxx;
@@ -940,7 +998,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
     // the generic loop, with the texel fetch specialised per bpp and the
     // modulation inlined, so the output is identical.
     if (textured && gouraud) {
-        SpanCtx sc = {t.page, t.clut, udx, vdx, rdx, gdx, bdx, semi, t.abr, 0, 0, 0, 0};
+        SpanCtx sc = {t.page, t.clut, udx, vdx, rdx, gdx, bdx, semi, t.abr, 0, 0, 0, 0, 0};
         for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
                  w2row += B2, rrow += rdy, grow += gdy, brow += bdy,
                  urow += udy, vrow += vdy) {
