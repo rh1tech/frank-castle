@@ -21,6 +21,7 @@
 
 #include "pico/stdlib.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define VRAM_W 1024
@@ -93,11 +94,22 @@ void Draw_PutDispEnv(DISPENV *disp) { (void)disp; }
 /* Scanout (core 1)                                                    */
 /* ------------------------------------------------------------------ */
 
+/* A game may know better than the GP1 display area which buffer is complete
+ * (SOTN flips with PutDispEnv only after VSync returns, often after active
+ * video has begun). Return true and the origin to override. */
+bool __attribute__((weak)) Psyz_DisplayOrigin(int *x, int *y) {
+    (void)x;
+    (void)y;
+    return false;
+}
+
 static void __not_in_flash_func(latch_frame)(void) {
     int w = disp_w;
+    int ox = disp_x, oy = disp_y;
+    Psyz_DisplayOrigin(&ox, &oy);
     frame_on = disp_on;
-    frame_x = disp_x;
-    frame_y = disp_y;
+    frame_x = ox & (VRAM_W - 1);
+    frame_y = oy & (VRAM_H - 1);
     frame_w = w;
     frame_native = w >= 512;
     int out = frame_native ? PSXV_OUT_W : PSXV_OUT_W / 2;
@@ -196,11 +208,38 @@ extern void Psyz_AudioLock(void);
 extern void Psyz_AudioUnlock(void);
 extern void Psyz_SpuPullSamples(short *out, int num_frames);
 
+/* Frame statistics, logged every 2 s: game time per frame excluding the
+ * vsync wait, worst frame, and frames actually presented per second. */
+static uint64_t stat_t0, stat_work_us;
+static uint32_t stat_frames, stat_worst_us, stat_vblank0;
+
+static void frame_stats(uint64_t work_us) {
+    stat_work_us += work_us;
+    if (work_us > stat_worst_us) stat_worst_us = (uint32_t)work_us;
+    stat_frames++;
+    uint64_t now = time_us_64();
+    if (!stat_t0) {
+        stat_t0 = now;
+        stat_vblank0 = vblank_count;
+    } else if (now - stat_t0 >= 2000000) {
+        extern volatile uint32_t psxv_late_rows;
+        printf("[perf] %lu fps, game %lu us avg / %lu us worst, late rows %lu\n",
+               (unsigned long)(stat_frames * 1000000ull / (now - stat_t0)),
+               (unsigned long)(stat_work_us / stat_frames), (unsigned long)stat_worst_us,
+               (unsigned long)psxv_late_rows);
+        stat_t0 = now;
+        stat_frames = 0;
+        stat_work_us = 0;
+        stat_worst_us = 0;
+    }
+}
+
 int Psyz_VideoVSync(int mode) {
     if (mode < 0) return (int)vblank_count;
     /* horizontal lines since the last vsync, 63.5 us each (NTSC) */
     int lines = (int)(((time_us_64() - last_vsync_us) * 2) / 127) & 0xFFFF;
     if (mode == 0) {
+        frame_stats(time_us_64() - last_vsync_us);
         Psyz_AudioLock();
         Psyz_SpuPullSamples(spu_frame, SPU_FRAMES_PER_VSYNC);
         Psyz_AudioUnlock();

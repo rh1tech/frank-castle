@@ -35,6 +35,18 @@ extern unsigned short vram[1024 * 512];
 
 extern void PsxVideo_Core1Loop(void);
 
+/* SOTN draws a frame, calls VSync and only then flips to it, so at vblank
+ * psyz's display area still points at the buffer about to be redrawn. Its
+ * g_CurrentBuffer->disp is always the last completed frame. */
+#include <game.h>
+bool Psyz_DisplayOrigin(int *x, int *y) {
+    GpuBuffer *b = g_CurrentBuffer;
+    if (!b || b->disp.disp.w == 0) return false;
+    *x = b->disp.disp.x;
+    *y = b->disp.disp.y;
+    return true;
+}
+
 static void core1_main(void) {
     psxv_start();
     PsxVideo_Core1Loop();
