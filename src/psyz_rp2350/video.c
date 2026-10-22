@@ -463,7 +463,8 @@ volatile uint32_t psxv_vsync_ret_us; /* time_us_32 when VSync last returned */
 static uint32_t vsync_entry_at_us, vsync_late, vsync_calls; /* timeline (perf log) */
 static uint64_t vsync_entry_us;
 static uint32_t wait_late, wait_late_vsync_us; /* reached the vblank wait after the vblank */
-static uint32_t late_log[8][8]; /* late frames: VSync entry, DrawSync return, core 1 drain, mixing us, SD sectors */
+static uint32_t late_log[8][14];
+static uint32_t vram_at_ret, shadow_at_ret; /* gpu_vram_us/gpu_shadow_us at the last VSync return */ /* late frames: VSync entry, DrawSync return, core 1 drain, mixing us, SD sectors */
 
 
 /* Frame statistics, logged every 2 s: game time per frame excluding the
@@ -522,10 +523,12 @@ static void frame_stats(uint64_t work_us) {
                    (unsigned long)(vsync_entry_at_us / (vsync_calls ? vsync_calls : 1)), (unsigned long)vsync_late,
                    (unsigned long)vsync_calls, (unsigned long)gpu_tl_frames);
         for (uint32_t k = 0; k < vsync_late && k < 8; k++)
-            PV("[perf] late frame: VSync at %lu, DrawSync done %lu, core 1 drained %lu us, mixing %lu us, %lu SD sectors, raster %lu us, core-1 flush %lu us (%lu rows)\n",
+            PV("[perf] late frame: VSync at %lu, DrawSync done %lu, core 1 drained %lu us, mixing %lu us, %lu SD sectors, raster %lu us, core-1 flush %lu us (%lu rows), vram ops %lu us, slot copies %lu us, slowest op kind %lu %lux%lu %lu us\n",
                    (unsigned long)late_log[k][0], (unsigned long)late_log[k][1], (unsigned long)late_log[k][2],
                    (unsigned long)late_log[k][3], (unsigned long)late_log[k][4], (unsigned long)late_log[k][5],
-                   (unsigned long)late_log[k][6], (unsigned long)late_log[k][7]);
+                   (unsigned long)late_log[k][6], (unsigned long)late_log[k][7], (unsigned long)late_log[k][8],
+                   (unsigned long)late_log[k][9], (unsigned long)late_log[k][10], (unsigned long)late_log[k][11],
+                   (unsigned long)late_log[k][12], (unsigned long)late_log[k][13]);
         if (wait_late)
             PV("[perf] %lu frames reached the vblank wait late, VSync work in them %lu us avg\n",
                    (unsigned long)wait_late, (unsigned long)(wait_late_vsync_us / wait_late));
@@ -635,6 +638,13 @@ int Psyz_VideoVSync(int mode) {
                 late_log[vsync_late][5] = frame_raster_us;
                 late_log[vsync_late][6] = frame_c1flush_us;
                 late_log[vsync_late][7] = frame_c1flush_rows;
+                late_log[vsync_late][8] = gpu_vram_us - vram_at_ret;
+                late_log[vsync_late][9] = gpu_shadow_us - shadow_at_ret;
+                extern volatile uint32_t big_op_kind, big_op_w, big_op_h, big_op_us;
+                late_log[vsync_late][10] = big_op_kind;
+                late_log[vsync_late][11] = big_op_w;
+                late_log[vsync_late][12] = big_op_h;
+                late_log[vsync_late][13] = big_op_us;
             }
             vsync_late++;
         }
@@ -684,6 +694,10 @@ int Psyz_VideoVSync(int mode) {
             audio_frame_us = sd_frame_reads = 0;
             extern volatile uint32_t frame_c1flush_us, frame_raster_us, frame_c1flush_rows;
             frame_c1flush_us = frame_raster_us = frame_c1flush_rows = 0;
+            vram_at_ret = gpu_vram_us;
+            extern volatile uint32_t big_op_us;
+            big_op_us = 0;
+            shadow_at_ret = gpu_shadow_us;
         }
     }
     return lines;

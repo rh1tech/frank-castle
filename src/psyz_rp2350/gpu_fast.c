@@ -481,6 +481,22 @@ static void exec_prim(u_long *packets, int len) {
     }
 }
 
+/* slowest VRAM op this frame (diagnostic): kind 1 load, 2 move, 3 store */
+volatile uint32_t big_op_kind, big_op_w, big_op_h, big_op_us;
+#define TIMED_RECT(kind, rect, call)                                  \
+    do {                                                              \
+        uint64_t t0_ = time_us_64();                                  \
+        gpu_c1_state = 5;                                             \
+        call;                                                         \
+        uint32_t d_ = (uint32_t)(time_us_64() - t0_);                 \
+        gpu_vram_us += d_;                                            \
+        if (d_ > big_op_us) {                                         \
+            big_op_us = d_;                                           \
+            big_op_kind = (kind);                                     \
+            big_op_w = (rect)->w;                                     \
+            big_op_h = (rect)->h;                                     \
+        }                                                             \
+    } while (0)
 #define TIMED(call)                                                   \
     do {                                                              \
         uint64_t t0_ = time_us_64();                                  \
@@ -545,7 +561,7 @@ static void exec_move(PS1_RECT *rect, int x, int y) {
     PS1_RECT dst = {(short)x, (short)y, rect->w, rect->h};
     before_read(rect);
     before_write(&dst);
-    TIMED(soft_move_image(rect, x, y));
+    TIMED_RECT(2, rect, soft_move_image(rect, x, y));
     vrow_forget(x, y, rect->w, rect->h);
 }
 
@@ -588,7 +604,7 @@ bool __not_in_flash_func(Gpu_Core1Work)(uint32_t budget_us) {
         case GQ_LOAD: {
             PS1_RECT *r = (PS1_RECT *)&load_buf[0];
             before_write(r);
-            TIMED(load_image_fast(r, (const u16 *)&load_buf[2]));
+            TIMED_RECT(1, r, load_image_fast(r, (const u16 *)&load_buf[2]));
             break;
         }
         }
@@ -684,13 +700,13 @@ void Draw_LoadImage(PS1_RECT *rect, u_long *p) {
     }
     gpu_fence_c(2);
     before_write(rect);
-    TIMED(load_image_fast(rect, (const u16 *)p));
+    TIMED_RECT(1, rect, load_image_fast(rect, (const u16 *)p));
 }
 void Draw_StoreImage(PS1_RECT *rect, u_long *p) {
     if (!rect->w || !rect->h) return;
     gpu_fence_c(3);
     before_read(rect);
-    TIMED(soft_store_image(rect, (u16 *)p));
+    TIMED_RECT(3, rect, soft_store_image(rect, (u16 *)p));
 }
 
 /* Called by video.c before waiting for vblank. A frame held in a half slot
@@ -821,8 +837,9 @@ int Draw_ExequeSync(void) {
      * step must not push the frame past vblank. The audio ring holds ~80 ms
      * and VSync tops it up if it ever runs low. */
     if (time_us_32() - psxv_vsync_ret_us < 9000) Psyz_CdPrefetch();
-    while ((gq_head != gq_tail || gq_exec) && time_us_32() - psxv_vsync_ret_us < 9000 &&
-           Audio_IdleFill()) {
+    /* light frames (core 1 already done) still top the audio up here: the
+     * frame is young, and VSync's emergency top-up is the expensive place */
+    while (time_us_32() - psxv_vsync_ret_us < 9000 && Audio_IdleFill()) {
     }
     gpu_fence_c(0);
     gpu_drain_at_us += drain_last;

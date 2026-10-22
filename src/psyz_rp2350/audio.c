@@ -133,6 +133,8 @@ uint32_t Audio_Level(void) { return ring_wr - ring_rd; }
 /* VSync: emergency top-up only (the DrawSync wait normally keeps it full). */
 void Audio_FrameFill(void) {
     if (ring_wr - ring_rd >= AUDIO_LOW) return;
+    extern void Psyz_CdPrefetch(void);
+    Psyz_CdPrefetch(); /* read music sectors first: mixing must not hit the card */
     while (Audio_FillStep(AUDIO_LOW + 512)) {
     }
 }
