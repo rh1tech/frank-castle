@@ -19,6 +19,7 @@
 
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
+#include "hardware/irq.h"
 #include "hardware/structs/qmi.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
@@ -245,16 +246,34 @@ unsigned platform_init_psram(void) {
 extern void usbhid_init(void);
 extern void usbhid_task(void);
 
-static bool usb_pump_cb(repeating_timer_t *rt) {
-    (void)rt;
-    usbhid_task();
-    return true;
+/* The host task runs on the game thread, once per frame (platform_usb_poll
+ * from VSync), not in a timer interrupt: TinyUSB enumerates with blocking
+ * delays, and something on the port that never enumerates (another host,
+ * e.g. a PC on the USB-C port) kept it looping inside the interrupt, which
+ * froze core 0 for good. A one-shot alarm bounds each call: if one blocks
+ * for over a second the USB interrupt is switched off, the call drains and
+ * returns, and the host stays off until the next boot. */
+static volatile bool usb_dead;
+static alarm_id_t usb_guard;
+
+static int64_t usb_guard_cb(alarm_id_t id, void *user) {
+    (void)id;
+    (void)user;
+    usb_dead = true;
+    irq_set_enabled(USBCTRL_IRQ, false);
+    return 0;
 }
 
 void platform_init_usb(void) {
-    static repeating_timer_t timer;
     usbhid_init();
-    add_repeating_timer_us(-1000, usb_pump_cb, NULL, &timer);
+}
+
+void platform_usb_poll(void) {
+    if (usb_dead) return;
+    usb_guard = add_alarm_in_ms(1000, usb_guard_cb, NULL, true);
+    usbhid_task();
+    if (usb_guard > 0) cancel_alarm(usb_guard);
+    if (usb_dead) printf("USB host: device on the port does not enumerate, host disabled\n");
 }
 
 /* ------------------------------------------------------------------ */

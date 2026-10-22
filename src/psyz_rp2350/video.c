@@ -229,13 +229,21 @@ static volatile int stream_row = -1; /* row in flight, -1: idle */
 static uint32_t stream_row_seq;
 volatile uint32_t psxv_stream_rows;
 
-static void stream_start(const uint32_t *src, uint32_t *dst, uint32_t words) {
+/* The channel is configured once (stream_setup); a transfer only sets the
+ * destination and length: the rasterizer starts ~1500 row fetches a frame
+ * on the title screen. */
+static void stream_setup(void) {
     dma_channel_config c = dma_channel_get_default_config(stream_ch);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
     channel_config_set_read_increment(&c, false);
     channel_config_set_write_increment(&c, true);
     channel_config_set_dreq(&c, DREQ_XIP_STREAM);
-    dma_channel_configure(stream_ch, &c, dst, &xip_aux_hw->stream, words, false);
+    dma_channel_configure(stream_ch, &c, NULL, &xip_aux_hw->stream, 0, false);
+}
+
+static inline void stream_start(const uint32_t *src, uint32_t *dst, uint32_t words) {
+    dma_channel_set_write_addr(stream_ch, dst, false);
+    dma_channel_set_trans_count(stream_ch, words, false);
     xip_ctrl_hw->stream_addr = (uint32_t)(uintptr_t)src;
     xip_ctrl_hw->stream_ctr = words;
     dma_channel_start(stream_ch);
@@ -261,6 +269,7 @@ void Video_StreamInit(void) {
     for (int i = 0; i < 64; i++) ps_unc[i] = 0xA5000000u ^ (uint32_t)i * 0x01010101u;
     stream_ch = dma_claim_unused_channel(false);
     if (stream_ch < 0) return;
+    stream_setup();
     stream_start(ps, probe, 64);
     absolute_time_t t = make_timeout_time_us(1000);
     while (dma_channel_is_busy(stream_ch) && !time_reached(t)) tight_loop_contents();
@@ -281,6 +290,43 @@ static inline void __attribute__((always_inline)) expand_row(uint16_t *line) {
         uint16_t a = line[xmap[j]], b = line[xmap[j + 1]], c = line[xmap[j + 2]], d = line[xmap[j + 3]];
         line[j] = a; line[j + 1] = b; line[j + 2] = c; line[j + 3] = d;
     }
+}
+
+/* The scanout row in flight has landed: account for it. */
+static inline void stream_retire(void) {
+    /* a vblank during the transfer restarted the frame: drop the row */
+    if (stream_row_seq == frame_seq && fill_row == stream_row) {
+        if (frame_expand) expand_row(line_buf[stream_row % NBUF]);
+        fill_row = stream_row + 1;
+    }
+    stream_row = -1;
+}
+
+/* The rasterizer (core 1, like the scanout) borrows the stream engine to
+ * fetch 8/15bpp texture rows into SRAM in one burst instead of a cache miss
+ * per 8 bytes. One transfer at a time: a texture fetch waits for a scanout
+ * row in flight, the scanout waits for a texture row (a few us). */
+static bool tex_inflight;
+
+volatile uint32_t tex_wait_us, tex_fetches; /* diagnostic */
+bool __not_in_flash_func(Video_TexFetch)(const void *src, void *dst, uint32_t words) {
+    if (stream_ch < 0) return false;
+    uint32_t t0 = time_us_32();
+    while (dma_channel_is_busy(stream_ch)) tight_loop_contents();
+    tex_wait_us += time_us_32() - t0;
+    tex_fetches++;
+    if (stream_row >= 0) stream_retire();
+    tex_inflight = true;
+    stream_start((const uint32_t *)src, (uint32_t *)dst, words);
+    return true;
+}
+
+void __not_in_flash_func(Video_TexWait)(void) {
+    if (!tex_inflight) return;
+    uint32_t t0 = time_us_32();
+    while (dma_channel_is_busy(stream_ch)) tight_loop_contents();
+    tex_wait_us += time_us_32() - t0;
+    tex_inflight = false;
 }
 
 /* Copy the next scanout row into the ring if the beam needs it. Returns
@@ -313,12 +359,7 @@ static inline bool __attribute__((always_inline)) fill_one(void) {
             }
         }
         if (stream_row < 0) goto copy;
-        /* a vblank during the transfer restarted the frame: drop the row */
-        if (stream_row_seq == frame_seq && fill_row == stream_row) {
-            if (frame_expand) expand_row(line_buf[stream_row % NBUF]);
-            fill_row = stream_row + 1;
-        }
-        stream_row = -1;
+        stream_retire();
     }
 copy:;
     uint32_t seq = frame_seq;
@@ -337,6 +378,10 @@ copy:;
     if (stream_ch >= 0 && !urgent && !(((uintptr_t)src | (uintptr_t)dst16) & 3)) {
         /* the stream bypasses the cache: commit any pending writes first */
         xip_cache_clean_range((uintptr_t)src - XIP_BASE, (uint32_t)n * 2);
+        if (tex_inflight) { /* a texture row is still coming in */
+            while (dma_channel_is_busy(stream_ch)) tight_loop_contents();
+            tex_inflight = false;
+        }
         stream_row = row;
         stream_row_seq = seq;
         psxv_stream_rows++;
@@ -514,6 +559,9 @@ static void frame_stats(uint64_t work_us) {
                (unsigned long)(flush_rows_skipped / stat_frames));
             flush_maint_us = flush_copy_us = flush_rows_skipped = 0;
         }
+        PV("[perf] texture row fetches %lu/frame, waiting %lu us/frame\n", (unsigned long)(tex_fetches / stat_frames),
+           (unsigned long)(tex_wait_us / stat_frames));
+        tex_fetches = tex_wait_us = 0;
         extern volatile uint32_t ds_site_pc[8], ds_site_n[8], ds_site_us[8];
         for (int i = 0; i < 8 && ds_site_pc[i]; i++) {
             PV("[perf] DrawSync from %08lx: %lu calls, %lu us waited\n", (unsigned long)ds_site_pc[i],
@@ -612,6 +660,8 @@ int Psyz_VideoVSync(int mode) {
         }
         last_vsync_us = time_us_64();
         psxv_vsync_ret_us = (uint32_t)last_vsync_us;
+        extern void platform_usb_poll(void);
+        platform_usb_poll(); /* keyboard: once per frame, on the game thread */
         {
             extern volatile uint32_t audio_frame_us, sd_frame_reads;
             audio_frame_us = sd_frame_reads = 0;

@@ -50,7 +50,7 @@ u16 g_PsxVram[VRAM_PITCH * VRAM_H] __attribute__((section(".psram_bss.vram"), al
 static u16 shadow_buf[SHADOW_PIXELS] __attribute__((aligned(4)));
 /* Small offscreen render targets (SOTN draws a 63x63 one every scrolling
  * frame) get their own slot instead of evicting a framebuffer. */
-#define AUX_PIXELS (80 * 80)
+#define AUX_PIXELS (64 * 64) /* SOTN's offscreen target is 63x63 */
 #define FB_MIN_PIXELS 32768 /* draw areas this big are framebuffers */
 static u16 aux_buf[AUX_PIXELS] __attribute__((aligned(4)));
 #define NSLOT 3
@@ -307,6 +307,12 @@ static void tex_hook(u16 tpage, u16 clut) {
             slot_flush_c(&slot[i], CAUSE_TEX);
 }
 #define TEX_HOOK(tpage, clut) tex_hook(tpage, clut)
+
+/* 8/15bpp sprite rows through the XIP stream engine (video.c) */
+extern bool Video_TexFetch(const void *src, void *dst, uint32_t words);
+extern void Video_TexWait(void);
+#define SOFT_ROW_FETCH(src, dst, words) Video_TexFetch(src, dst, words)
+#define SOFT_ROW_WAIT() Video_TexWait()
 
 
 

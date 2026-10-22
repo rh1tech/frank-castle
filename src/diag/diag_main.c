@@ -332,6 +332,7 @@ int main(void) {
                 }
             }
         }
+        platform_usb_poll();
         uint8_t key;
         int down;
         while (usbhid_get_key_action(&key, &down)) {

@@ -160,6 +160,35 @@ static inline u16 blend5551(u16 back, int fr5, int fg5, int fb5, int abr) {
     return (u16)(r | (g << 5) | (b << 10));
 }
 
+// Same four modes on packed RGB555 values (bit 15 of either input ignored,
+// result has it clear): per-channel results identical to blend5551, without
+// unpacking. Add/subtract spread the 5-bit fields into 10-bit lanes so they
+// cannot carry or borrow into each other, then saturate per lane.
+static inline uint32_t spread555(uint32_t c) {
+    return (c & 0x1F) | ((c & 0x3E0) << 5) | ((c & 0x7C00) << 10);
+}
+static inline u16 pack555(uint32_t x) {
+    return (u16)((x & 0x1F) | ((x >> 5) & 0x3E0) | ((x >> 10) & 0x7C00));
+}
+static inline u16 blend555(u16 back, u16 front, int abr) {
+    uint32_t b = back & 0x7FFF, f = front & 0x7FFF;
+    if (abr == 0) {
+        return (u16)((b & f) + (((b ^ f) & 0x7BDE) >> 1)); // (B + F) >> 1
+    }
+    uint32_t xb = spread555(b), xf = spread555(f);
+    if (abr == 2) { // B - F, clamped at 0
+        uint32_t d = (xb | 0x02008020) - xf;        // lanes hold 32 + B - F
+        uint32_t m = d & 0x02008020;                // lane >= 32: B >= F
+        return pack555(d & (m - (m >> 5)));         // keep only those lanes
+    }
+    if (abr == 3) {
+        xf = (xf >> 2) & 0x00701C07;                // F / 4 per lane
+    }
+    uint32_t sum = xb + xf;                         // B + F (or F/4), <= 62
+    uint32_t m = sum & 0x02008020;                  // lanes that passed 31
+    return pack555((sum | (m - (m >> 5))) & 0x01F07C1F);
+}
+
 // PS1 texture modulation: out5 = min(31, tex5 * col8 >> 7). 0x80 is neutral.
 static inline int mod5(int tex5, int col8) {
     int v = (tex5 * col8) >> 7;
@@ -315,8 +344,7 @@ typedef struct {
                                : (u16)(lr[texel & 0x1F] | lg[(texel >> 5) & 0x1F] | \
                                        lb[(texel >> 10) & 0x1F]);               \
             if (semi && (texel & 0x8000))                                       \
-                *dst = blend5551(*dst, m & 0x1F, (m >> 5) & 0x1F, m >> 10,      \
-                                 c->abr);                                       \
+                *dst = blend555(*dst, m, c->abr);                               \
             else                                                                \
                 *dst = (u16)(m | (texel & 0x8000));                             \
         }                                                                       \
@@ -347,7 +375,7 @@ typedef struct {
             if (g > 31) g = 31;                                                 \
             if (b > 31) b = 31;                                                 \
             if (c->semi && (texel & 0x8000))                                    \
-                *dst = blend5551(*dst, r, g, b, c->abr);                        \
+                *dst = blend555(*dst, (u16)(r | (g << 5) | (b << 10)), c->abr); \
             else                                                                \
                 *dst = (u16)(r | (g << 5) | (b << 10) | (texel & 0x8000));      \
         }                                                                       \
@@ -379,8 +407,7 @@ DEF_SPAN_TG(span_tg15, TEXEL15)
                                : (u16)(lr[texel & 0x1F] | lg[(texel >> 5) & 0x1F] | \
                                        lb[(texel >> 10) & 0x1F]);               \
             if (semi && (texel & 0x8000))                                       \
-                *dst = blend5551(*dst, m & 0x1F, (m >> 5) & 0x1F, m >> 10,      \
-                                 c->abr);                                       \
+                *dst = blend555(*dst, m, c->abr);                               \
             else                                                                \
                 *dst = (u16)(m | (texel & 0x8000));                             \
         }                                                                       \
@@ -401,7 +428,7 @@ SOFT_RASTER_IRAM static void span_spr4(u16* dst, int n, int u, const u16* trow,
                                    : (u16)(lr[texel & 0x1F] | lg[(texel >> 5) & 0x1F] |
                                            lb[(texel >> 10) & 0x1F]);
                 if (semi && (texel & 0x8000))
-                    *dst = blend5551(*dst, m & 0x1F, (m >> 5) & 0x1F, m >> 10, c->abr);
+                    *dst = blend555(*dst, m, c->abr);
                 else
                     *dst = (u16)(m | (texel & 0x8000));
             }
@@ -412,8 +439,54 @@ SOFT_RASTER_IRAM static void span_spr4(u16* dst, int n, int u, const u16* trow,
         } while (sh < 4 && n > 0);
     }
 }
-DEF_SPAN_SPR(span_spr8, SPR_TEXEL8)
-DEF_SPAN_SPR(span_spr15, SPR_TEXEL15)
+DEF_SPAN_SPR(span_spr8_gen, SPR_TEXEL8)
+DEF_SPAN_SPR(span_spr15_gen, SPR_TEXEL15)
+
+// Neutral, opaque 8/15bpp rows (backdrops) that do not wrap around the
+// page: texel 0 stays transparent and everything else is copied as is,
+// exactly what the general loop computes with identity tables.
+SOFT_RASTER_IRAM static void span_spr8(u16* dst, int n, int u, const u16* trow,
+                                       const SpanCtx* c) {
+    if (!c->neutral || c->semi || (u & 0xFF) + n > 256) {
+        span_spr8_gen(dst, n, u, trow, c);
+        return;
+    }
+    const u16* clut = c->clut;
+    u &= 0xFF;
+    if (u & 1) {
+        u16 t = clut[TEX_RD(&trow[u >> 1]) >> 8];
+        if (t) *dst = t;
+        dst++;
+        u++;
+        n--;
+    }
+    const u16* src = &trow[u >> 1];
+    for (; n >= 2; n -= 2, dst += 2) {
+        u16 hw = TEX_RD(src);
+        src++;
+        u16 a = clut[hw & 0xFF], b = clut[hw >> 8];
+        if (a) dst[0] = a;
+        if (b) dst[1] = b;
+    }
+    if (n > 0) {
+        u16 t = clut[TEX_RD(src) & 0xFF];
+        if (t) *dst = t;
+    }
+}
+
+SOFT_RASTER_IRAM static void span_spr15(u16* dst, int n, int u, const u16* trow,
+                                        const SpanCtx* c) {
+    if (!c->neutral || c->semi || (u & 0xFF) + n > 256) {
+        span_spr15_gen(dst, n, u, trow, c);
+        return;
+    }
+    const u16* src = &trow[u & 0xFF];
+    for (; n > 0; n--, dst++) {
+        u16 t = TEX_RD(src);
+        src++;
+        if (t) *dst = t;
+    }
+}
 
 // Axis-aligned textured sprite (SPRT/SPRT_8/SPRT_16). PSX-exact sampling:
 // u advances one texel per pixel, no interpolation.
@@ -451,6 +524,39 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
     }
     SpanCtx sc = {t.page, t.clut, 0, 0, 0, 0, 0, semi, t.abr, lr, lg, lb,
                   v->r == 0x80 && v->g == 0x80 && v->b == 0x80};
+#ifdef SOFT_ROW_FETCH
+    // 8/15bpp rows (backdrops) come into SRAM in one burst each, the next
+    // row fetched while this one is drawn, instead of a cache miss per four
+    // or eight texels. Rows that wrap around the texture page take the
+    // normal path.
+    if (!tile && (t.bpp == 1 || t.bpp == 2) && v->u + i1 <= 255 && i1 - i0 >= 31) {
+        static u16 rbuf[2][260] __attribute__((aligned(4)));
+        int u0 = v->u + i0, u1 = v->u + i1, uoff, words;
+        if (t.bpp == 2) {
+            uoff = u0 & ~1;
+            words = (u1 - uoff) / 2 + 1;
+        } else {
+            uoff = (u0 & ~3) >> 1;
+            words = ((u1 >> 1) - uoff) / 2 + 1;
+        }
+        int cur = 0, n = i1 - i0 + 1;
+        if (SOFT_ROW_FETCH(t.page + ((v->v + j0) & 0xFF) * VRAM_PITCH + uoff, rbuf[0], words)) {
+            for (int j = j0; j <= j1; j++) {
+                SOFT_ROW_WAIT();
+                if (j < j1)
+                    SOFT_ROW_FETCH(t.page + ((v->v + j + 1) & 0xFF) * VRAM_PITCH + uoff,
+                                   rbuf[cur ^ 1], words);
+                u16* dst = &DROW(y0 + j)[x0 + i0];
+                const u16* trow = rbuf[cur] - uoff;
+                if (t.bpp == 1) span_spr8(dst, n, u0, trow, &sc);
+                else span_spr15(dst, n, u0, trow, &sc);
+                cur ^= 1;
+            }
+            SOFT_ROW_WAIT();
+            return;
+        }
+    }
+#endif
     for (int j = j0; j <= j1; j++) {
         u16* row = DROW(y0 + j);
         int tv = (v->v + j) & 0xFF;

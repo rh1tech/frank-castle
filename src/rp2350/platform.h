@@ -40,5 +40,6 @@ static inline uint32_t platform_cyccnt(void) {
 
 void __attribute__((noreturn)) platform_reboot(bool bootsel);
 void platform_uart_cmd(int ch);
+void platform_usb_poll(void);
 
 #endif /* PLATFORM_H */
