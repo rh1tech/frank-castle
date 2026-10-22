@@ -38,6 +38,7 @@ static uint32_t ring[RING_FRAMES]; /* packed L|R<<16 */
 static volatile uint32_t ring_wr, ring_rd;
 volatile uint32_t audio_underruns;
 volatile uint32_t audio_chunk_max_us; /* worst mixing step (diagnostic) */
+volatile uint32_t audio_peak;         /* loudest sample mixed since the last perf log */
 static bool audio_running;
 
 /* ---- root counter ticks from core 1, replayed on core 0 ---- */
@@ -91,7 +92,7 @@ void Audio_Init(void) {
 /* Game core, once per VSync: top the ring up to AUDIO_TARGET frames. Mixing
  * here keeps core 1 free for scanout and rasterizing, and the root counter
  * handlers fire on the game thread as they should. */
-#define AUDIO_TARGET 2048 /* ~46 ms buffered */
+#define AUDIO_TARGET 3072 /* ~70 ms buffered: menus run at ~20 fps */
 void Audio_FrameFill(void) {
     static short buf[256 * 2];
     extern volatile bool psyz_audio_ready;
@@ -105,8 +106,14 @@ void Audio_FrameFill(void) {
         Psyz_SpuPullSamples(buf, (int)n);
         Psyz_AudioUnlock();
         uint32_t wr = ring_wr;
-        for (uint32_t i = 0; i < n; i++)
-            ring[(wr + i) & (RING_FRAMES - 1)] = (uint16_t)buf[2 * i] | ((uint32_t)(uint16_t)buf[2 * i + 1] << 16);
+        uint32_t peak = audio_peak;
+        for (uint32_t i = 0; i < n; i++) {
+            int l = buf[2 * i], r = buf[2 * i + 1];
+            uint32_t m = (uint32_t)(l < 0 ? -l : l) | (uint32_t)(r < 0 ? -r : r);
+            if (m > peak) peak = m;
+            ring[(wr + i) & (RING_FRAMES - 1)] = (uint16_t)l | ((uint32_t)(uint16_t)r << 16);
+        }
+        audio_peak = peak;
         __dmb();
         ring_wr = wr + n;
         audio_running = true;

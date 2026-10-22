@@ -423,6 +423,11 @@ SOFT_RASTER_IRAM static void raster_tri(const SV* a, const SV* b, const SV* c, i
     if (area == 0) {
         return;
     }
+    // equal vertex colours: the gradient is zero, shade flat (exact)
+    if (gouraud && a->r == b->r && a->r == c->r && a->g == b->g && a->g == c->g &&
+        a->b == b->b && a->b == c->b) {
+        gouraud = 0;
+    }
     if (area < 0) { // enforce CCW so the edge functions face inward
         const SV* t = b;
         b = c;
@@ -620,6 +625,74 @@ SOFT_RASTER_IRAM static void raster_tri(const SV* a, const SV* b, const SV* c, i
                 *(u16*)p2 = SPAN_PIX();
             }
 #undef SPAN_PIX
+        }
+        return;
+    }
+
+    // Textured, one colour (scaled scenery, clouds, rotated
+    // sprites): the generic loop below pays tex_fetch's switch plus three
+    // multiply-clamps per pixel. Same spans and UV stepping, so the output
+    // is identical; modulation comes from per-primitive tables holding
+    // exactly mod5(c, col).
+    if (textured && !gouraud) {
+        static u16 lr[32], lg[32], lb[32];
+        static int lkey = -1;
+        int key = a->r | a->g << 8 | a->b << 16;
+        if (key != lkey) {
+            for (int c = 0; c < 32; c++) {
+                lr[c] = (u16)mod5(c, a->r);
+                lg[c] = (u16)(mod5(c, a->g) << 5);
+                lb[c] = (u16)(mod5(c, a->b) << 10);
+            }
+            lkey = key;
+        }
+        for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
+                 w2row += B2, urow += udy, vrow += vdy) {
+            int xl = minx, xr = maxx;
+            int we[3] = {w0row, w1row, w2row};
+            int Ae[3] = {A0, A1, A2};
+            int empty = 0;
+            for (int e = 0; e < 3; e++) {
+                int w = we[e], A = Ae[e];
+                if (A == 0) {
+                    if (w < 0) { empty = 1; break; }
+                } else if (A > 0) {
+                    if (w < 0) {
+                        int x = minx + (-w + A - 1) / A;
+                        if (x > xl) xl = x;
+                    }
+                } else {
+                    if (w < 0) { empty = 1; break; }
+                    int x = minx + w / (-A);
+                    if (x < xr) xr = x;
+                }
+            }
+            if (empty || xl > xr) {
+                continue;
+            }
+            fx ui = urow + (fx)(xl - minx) * udx;
+            fx vi = vrow + (fx)(xl - minx) * vdx;
+            u16* row = DROW(y);
+            for (int x = xl; x <= xr; x++, ui += udx, vi += vdx) {
+                int u = (int)(ui >> 16) & 0xFF, v = (int)(vi >> 16) & 0xFF;
+                const u16* trow = t.page + v * VRAM_W;
+                u16 texel;
+                if (t.bpp == 0) {
+                    texel = t.clut[(trow[u >> 2] >> ((u & 3) * 4)) & 0xF];
+                } else if (t.bpp == 1) {
+                    texel = t.clut[(trow[u >> 1] >> ((u & 1) * 8)) & 0xFF];
+                } else {
+                    texel = trow[u];
+                }
+                if (!texel) continue;
+                u16 m = (u16)(lr[texel & 0x1F] | lg[(texel >> 5) & 0x1F] |
+                              lb[(texel >> 10) & 0x1F]);
+                if (semi && (texel & 0x8000)) {
+                    row[x] = blend5551(row[x], m & 0x1F, (m >> 5) & 0x1F, m >> 10, t.abr);
+                } else {
+                    row[x] = (u16)(m | (texel & 0x8000));
+                }
+            }
         }
         return;
     }

@@ -455,6 +455,11 @@ static void frame_stats(uint64_t work_us) {
         printf("[perf] gpu fence wait %lu us/frame, core1: hdmi irq %lu%%, gpu work %lu%%\n",
                (unsigned long)(gpu_fence_us / stat_frames), (unsigned long)(psxv_irq_us / 20000),
                (unsigned long)(gpu_busy_us / 20000));
+        extern volatile uint32_t audio_peak;
+        extern unsigned psyz_xa_sectors, psyz_xa_stride_hits;
+        printf("[perf] audio peak %lu, XA sectors %u (stride hits %u)\n", (unsigned long)audio_peak,
+               psyz_xa_sectors, psyz_xa_stride_hits);
+        audio_peak = 0;
         extern volatile uint32_t psxv_stream_rescues;
         printf("[perf] stream rescues %lu, late rows by core-1 state idle/prim/flush/load/clear/vram: %lu/%lu/%lu/%lu/%lu/%lu\n", (unsigned long)psxv_stream_rescues,
                (unsigned long)psxv_late_by[0], (unsigned long)psxv_late_by[1], (unsigned long)psxv_late_by[2],

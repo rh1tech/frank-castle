@@ -58,6 +58,18 @@ void platform_uart_cmd(int ch) {
         sleep_ms(20);
         platform_reboot(true);
     }
+    /* "~PROF~": profile from now on (profiler builds link profiler_rearm) */
+    extern void profiler_rearm(void) __attribute__((weak));
+    static const char prof[] = "~PROF~";
+    static unsigned ppos;
+    ppos = (ch == prof[ppos]) ? ppos + 1 : (ch == prof[0]);
+    if (ppos == sizeof(prof) - 1) {
+        ppos = 0;
+        if (profiler_rearm) {
+            printf("\nprofiling\n");
+            profiler_rearm();
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */

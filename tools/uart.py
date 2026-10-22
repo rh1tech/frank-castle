@@ -5,6 +5,7 @@
 #   tools/uart.py cap SECONDS [OUT]          capture to OUT (default stdout)
 #   tools/uart.py send "SEQ" [SECONDS OUT]   play SEQ, optionally capture meanwhile
 #   tools/uart.py bootsel                    ask the firmware to reboot into BOOTSEL
+#   tools/uart.py prof SECONDS OUT           profiler builds: sample now, capture
 #
 # SEQ is space separated:  KEY | KEY*FRAMES (hold) | wMS (wait)
 #   keys: w a s d (d-pad)  x z c v (cross square circle triangle)
@@ -59,6 +60,11 @@ def play(fd, seq):
 
 
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == "prof":
+        fd = open_port()
+        os.write(fd, b"~PROF~")
+        capture(fd, float(sys.argv[2]), sys.argv[3], threading.Event())
+        return
     if len(sys.argv) == 2 and sys.argv[1] == "bootsel":
         fd = open_port()
         os.write(fd, b"~BOOT~")

@@ -67,11 +67,24 @@ void profiler_start(void) {
 }
 
 /* Start sampling now instead of after PROFILE_DELAY_S (first call wins). */
+static bool triggered;
 void profiler_trigger(void) {
-    static bool triggered;
     if (triggered) return;
     triggered = true;
     start_us = time_us_64();
+}
+
+/* "~PROF~" on the UART: take a fresh set of samples starting now. */
+void profiler_rearm(void) {
+    timer_hw_t *t = timer1_hw;
+    triggered = true;
+    nsamples = 0;
+    n_memcpy_lr = 0;
+    printed = false;
+    start_us = time_us_64();
+    done = false;
+    t->alarm[0] = t->timerawl + 1000;
+    t->inte |= 1u;
 }
 
 /* called from the game thread (VSync) */
