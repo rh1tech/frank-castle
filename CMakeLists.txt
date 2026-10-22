@@ -187,6 +187,7 @@ add_executable(frank-castle
     src/rp2350/game_main.c
     src/psyz_rp2350/gpu_fast.c
     src/psyz_rp2350/video.c
+    src/psyz_rp2350/audio.c
     src/psyz_rp2350/platform.c
     src/psyz_rp2350/module_static.c
     ${CMAKE_BINARY_DIR}/castle_modules.c
@@ -210,6 +211,7 @@ target_link_options(frank-castle PRIVATE
     -Wl,-L${CMAKE_BINARY_DIR}
     -Wl,--no-enum-size-warning
     -Wl,--wrap=panic
+    -Wl,--wrap=Psyz_RcntAdd
     -Wl,--print-memory-usage
 )
 set_property(TARGET frank-castle APPEND PROPERTY LINK_DEPENDS

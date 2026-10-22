@@ -43,6 +43,10 @@ static volatile bool frame_native;   /* 512/640 modes: one VRAM pixel per output
 static volatile int frame_copy_px;   /* pixels copied from VRAM per row */
 static volatile int frame_src_x;     /* VRAM x of the first copied pixel */
 static volatile int frame_pad;       /* black pixels before the copied ones */
+/* when the frame is held in an SRAM framebuffer slot (gpu_fast.c) */
+static const u16 *volatile frame_sram;
+volatile uint32_t scan_sram, scan_psram; /* latches by source (diagnostic) */
+static volatile int frame_sram_stride, frame_sram_r0, frame_sram_r1;
 
 /* Ring of line buffers filled by the core 1 main loop (PsxVideo_Core1Loop)
  * a few source rows ahead of the beam. The copy is done by the CPU through the
@@ -119,13 +123,27 @@ static void __not_in_flash_func(latch_frame)(void) {
     frame_src_x = frame_x + (w > out ? (w - out) / 2 : 0); /* 368: show the middle 320 */
     if (frame_src_x + frame_copy_px > VRAM_W) frame_copy_px = VRAM_W - frame_src_x;
     frame_pad = (out - frame_copy_px) / 2;
-    /* borders stay black: clear them whenever the geometry changes */
+    /* ring rows keep black borders: clear them whenever the geometry changes */
     static int last_pad = -1, last_px = -1;
     if (frame_pad != last_pad || frame_copy_px != last_px) {
         uint32_t *p = (uint32_t *)line_buf;
         for (unsigned i = 0; i < sizeof(line_buf) / 4; i++) p[i] = 0;
         last_pad = frame_pad;
         last_px = frame_copy_px;
+    }
+    extern bool Gpu_ScanoutSource(int x, int y, const u16 **row0, int *stride, int *r0, int *r1);
+    const u16 *base;
+    int stride, r0, r1;
+    extern volatile uint32_t scan_sram, scan_psram;
+    if (Gpu_ScanoutSource(frame_x, frame_y, &base, &stride, &r0, &r1)) {
+        scan_sram++;
+        frame_sram = frame_w == 256 ? base : NULL; /* complete 320-px lines */
+        frame_sram_stride = stride;
+        frame_sram_r0 = r0;
+        frame_sram_r1 = r1;
+    } else {
+        scan_psram++;
+        frame_sram = NULL;
     }
 }
 
@@ -146,9 +164,15 @@ static void __not_in_flash_func(on_line)(uint32_t out_line, psxv_line_t *line) {
     }
     int row = (int)(out_line >> 1);
     beam_row = row;
+    line->mode = frame_native ? PSXV_LINE_NATIVE : PSXV_LINE_DOUBLE;
+    const u16 *sram = frame_sram;
+    if (sram && row >= frame_sram_r0 && row < frame_sram_r1) {
+        /* straight from the SRAM framebuffer: no copy, no deadline */
+        line->pixels = sram + row * frame_sram_stride;
+        return;
+    }
     if (row >= fill_row) psxv_late_rows++; /* shows whatever the slot held */
     line->pixels = line_buf[row & (NBUF - 1)];
-    line->mode = frame_native ? PSXV_LINE_NATIVE : PSXV_LINE_DOUBLE;
 }
 
 void PsxVideo_Init(void) {
@@ -175,10 +199,17 @@ void __not_in_flash_func(PsxVideo_Core1Loop)(void) {
         uint32_t seq = frame_seq;
         int row = fill_row;
         if (!frame_on || row >= PSXV_OUT_H / 2 || row > beam_row + FILL_AHEAD) {
-            tight_loop_contents();
+            /* scanout is ahead (or idle): mix a chunk of audio */
+            extern bool Audio_Core1Poll(void);
+            if (!Audio_Core1Poll()) tight_loop_contents();
             continue;
         }
         int y = (frame_y + row) & (VRAM_H - 1);
+        if (frame_sram && row >= frame_sram_r0 && row < frame_sram_r1) {
+            /* the line callback reads this row straight from SRAM */
+            if (seq == frame_seq) fill_row = row + 1;
+            continue;
+        }
         const uint32_t *src = (const uint32_t *)&vram[y * VRAM_W + frame_src_x];
         uint16_t *dst16 = &line_buf[row & (NBUF - 1)][frame_pad];
         int n = frame_copy_px;
@@ -201,19 +232,11 @@ void __not_in_flash_func(PsxVideo_Core1Loop)(void) {
 static PsyzVsyncMode vsync_mode = PSYZ_VSYNC_AUTO;
 static uint64_t last_vsync_us;
 
-/* One video frame of SPU output (44100/60). Until the I2S mixer runs on core 1
- * the SPU is stepped here, which also advances the root counters the game's
- * sound driver ticks on. */
-#define SPU_FRAMES_PER_VSYNC 735
-static short spu_frame[SPU_FRAMES_PER_VSYNC * 2];
-extern void Psyz_AudioLock(void);
-extern void Psyz_AudioUnlock(void);
-extern void Psyz_SpuPullSamples(short *out, int num_frames);
 
 /* Frame statistics, logged every 2 s: game time per frame excluding the
  * vsync wait, worst frame, and frames actually presented per second. */
 static uint64_t stat_t0, stat_work_us, stat_spu_us;
-extern volatile uint32_t gpu_prim_us, gpu_vram_us, gpu_prims, gpu_shadow_us;
+extern volatile uint32_t gpu_prim_us, gpu_vram_us, gpu_prims, gpu_shadow_us, audio_underruns, audio_chunk_max_us;
 static uint32_t stat_frames, stat_worst_us;
 
 static void frame_stats(uint64_t work_us) {
@@ -224,13 +247,21 @@ static void frame_stats(uint64_t work_us) {
     if (!stat_t0) {
         stat_t0 = now;
     } else if (now - stat_t0 >= 2000000) {
-        printf("[perf] %lu fps, game %lu us avg / %lu worst | raster %lu us (%lu prims) vram %lu us shadow %lu us spu %lu us | late rows %lu\n",
+        printf("[perf] %lu fps, game %lu us avg / %lu worst | raster %lu us (%lu prims) vram %lu us shadow %lu us rcnt %lu us | late rows %lu, audio underruns %lu, mix step max %lu us, scan sram/psram %lu/%lu, disp %d,%d\n",
                (unsigned long)(stat_frames * 1000000ull / (now - stat_t0)),
                (unsigned long)(stat_work_us / stat_frames), (unsigned long)stat_worst_us,
                (unsigned long)(gpu_prim_us / stat_frames), (unsigned long)(gpu_prims / stat_frames),
                (unsigned long)(gpu_vram_us / stat_frames), (unsigned long)(gpu_shadow_us / stat_frames),
                (unsigned long)(stat_spu_us / stat_frames),
-               (unsigned long)psxv_late_rows);
+               (unsigned long)psxv_late_rows, (unsigned long)audio_underruns,
+               (unsigned long)audio_chunk_max_us, (unsigned long)scan_sram, (unsigned long)scan_psram,
+               frame_x, frame_y);
+        scan_sram = scan_psram = 0;
+        extern void Gpu_DebugArea(int *a);
+        int a[6];
+        Gpu_DebugArea(a);
+        printf("[perf] draw area %d,%d..%d,%d ofs %d,%d\n", a[0], a[1], a[2], a[3], a[4], a[5]);
+        audio_chunk_max_us = 0;
         gpu_prim_us = gpu_vram_us = gpu_prims = gpu_shadow_us = 0;
         stat_spu_us = 0;
         stat_t0 = now;
@@ -247,10 +278,11 @@ int Psyz_VideoVSync(int mode) {
     if (mode == 0) {
         extern void Gpu_FlushForDisplay(void);
         Gpu_FlushForDisplay();
+        /* the SPU is mixed on core 1 (audio.c); its root counter ticks are
+         * replayed here, on the game thread */
+        extern void Audio_DrainRcnt(void);
         uint64_t t_spu = time_us_64();
-        Psyz_AudioLock();
-        Psyz_SpuPullSamples(spu_frame, SPU_FRAMES_PER_VSYNC);
-        Psyz_AudioUnlock();
+        Audio_DrainRcnt();
         stat_spu_us += time_us_64() - t_spu;
         frame_stats(time_us_64() - last_vsync_us);
         if (vsync_mode != PSYZ_VSYNC_LIMITLESS && vsync_mode != PSYZ_VSYNC_OFF) {

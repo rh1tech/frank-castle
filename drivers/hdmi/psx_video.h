@@ -29,9 +29,11 @@ typedef enum {
     PSXV_LINE_NATIVE = 1, /* 640 source pixels */
 } psxv_line_mode_t;
 
+/* Shared between code built with and without -fno-short-enums: no enum
+ * fields, every member has an explicit width. */
 typedef struct {
     const uint16_t *pixels; /* BGR555 (PS1 VRAM format), bit 15 ignored */
-    psxv_line_mode_t mode;
+    uint8_t mode;           /* psxv_line_mode_t */
 } psxv_line_t;
 
 /* out_line: 0..479 */

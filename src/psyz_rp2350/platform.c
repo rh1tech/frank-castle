@@ -122,14 +122,20 @@ void ResetPlatform(void) {}
 /* Audio lock. The SPU state is shared between the game and the mixer. */
 /* ------------------------------------------------------------------ */
 
-static recursive_mutex_t audio_mutex;
+/* initialised before main(): core 1 may take it before the game inits audio */
+auto_init_recursive_mutex(audio_mutex);
+volatile bool psyz_audio_ready; /* the mixer on core 1 waits for this */
 
 int Psyz_AudioInit(void) {
-    recursive_mutex_init(&audio_mutex);
+    Psyz_AudioLock();
     Psyz_SpuInit();
+    Psyz_AudioUnlock();
+    psyz_audio_ready = true;
     return 0;
 }
 void Psyz_AudioLock(void) { recursive_mutex_enter_blocking(&audio_mutex); }
+/* core 1 mixer: never block (scanout copies share that core) */
+bool Psyz_AudioTryLock(void) { return recursive_mutex_try_enter(&audio_mutex, NULL); }
 void Psyz_AudioUnlock(void) { recursive_mutex_exit(&audio_mutex); }
 
 /* ------------------------------------------------------------------ */

@@ -47,6 +47,8 @@ bool Psyz_DisplayOrigin(int *x, int *y) {
     return true;
 }
 
+extern void Audio_Init(void);
+
 static void core1_main(void) {
     psxv_start();
     PsxVideo_Core1Loop();
@@ -114,6 +116,7 @@ int main(void) {
     multicore_launch_core1(core1_main);
 
     platform_init_usb();
+    Audio_Init(); /* I2S IRQ on core 0; the SPU mixer runs on core 1 */
 
     if (platform_mount_sd() != FR_OK) fatal("SD card", "no readable FAT/exFAT filesystem");
     static char cue[160];
