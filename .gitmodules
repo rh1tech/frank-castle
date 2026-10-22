@@ -1,4 +1,4 @@
 [submodule "third_party/sotn-decomp"]
 	path = third_party/sotn-decomp
 	url = https://github.com/rh1tech/sotn-decomp.git
-	branch = master
+	branch = rp2350

@@ -53,6 +53,8 @@ endif()
 
 pico_sdk_init()
 
+set(SOTN_DIR ${CMAKE_CURRENT_LIST_DIR}/third_party/sotn-decomp)
+
 # ---------------------------------------------------------------------
 # Drivers (shared with the other FRANK ports)
 # ---------------------------------------------------------------------
@@ -95,11 +97,11 @@ set(CASTLE_DEFINES
 add_library(castle_platform STATIC
     src/common/font6x8.c
     src/common/fbcon.c
-    src/common/cdimage.c
+    ${SOTN_DIR}/src/pc/cdimage.c
     src/rp2350/platform.c
     src/rp2350/cd_fatfs.c
 )
-target_include_directories(castle_platform PUBLIC src/common src/rp2350)
+target_include_directories(castle_platform PUBLIC src/common src/rp2350 ${SOTN_DIR}/src/pc)
 target_compile_definitions(castle_platform PUBLIC ${CASTLE_DEFINES})
 target_link_libraries(castle_platform PUBLIC
     pico_stdlib pico_multicore hardware_clocks hardware_vreg hardware_watchdog
