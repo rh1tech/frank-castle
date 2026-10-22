@@ -22,11 +22,43 @@
 #include "hardware/structs/qmi.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
+#include "hardware/sync.h"
+#include "pico/bootrom.h"
+#include "pico/multicore.h"
 #include "ff.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* Reboot                                                              */
+/* ------------------------------------------------------------------ */
+
+/* Every software reboot goes through here: the PSRAM must leave QPI mode
+ * first, or the boot ROM cannot read the flash and the chip hangs until a
+ * power cycle (see psram_reset_to_spi). */
+void __attribute__((noreturn)) platform_reboot(bool bootsel) {
+    if (get_core_num() == 0) multicore_reset_core1();
+    save_and_disable_interrupts();
+    psram_reset_to_spi();
+    if (bootsel) reset_usb_boot(0, 0);
+    watchdog_reboot(0, 0, 10);
+    while (1) tight_loop_contents();
+}
+
+/* "~BOOT~" on the UART reboots into BOOTSEL, so the board can be reflashed
+ * over USB (picotool) without touching it. Feed every received byte here. */
+void platform_uart_cmd(int ch) {
+    static const char magic[] = "~BOOT~";
+    static unsigned pos;
+    pos = (ch == magic[pos]) ? pos + 1 : (ch == magic[0]);
+    if (pos == sizeof(magic) - 1) {
+        printf("\nrebooting to BOOTSEL\n");
+        sleep_ms(20);
+        platform_reboot(true);
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* Crash capture (survives the watchdog reboot)                        */
@@ -60,8 +92,8 @@ void __attribute__((noreturn)) __wrap_panic(const char *fmt, ...) {
         va_end(args);
         printf("\n");
     }
-    watchdog_reboot(0, 0, 100);
-    while (1) tight_loop_contents();
+    sleep_ms(100);
+    platform_reboot(false);
 }
 
 void __attribute__((used)) HardFault_Handler_C(uint32_t *frame) {
@@ -77,8 +109,8 @@ void __attribute__((used)) HardFault_Handler_C(uint32_t *frame) {
     printf("\n*** HARDFAULT core %u PC=0x%08x LR=0x%08x CFSR=0x%08x BFAR=0x%08x ***\n",
            (unsigned)crash_info[8], (unsigned)crash_info[1], (unsigned)crash_info[2],
            (unsigned)crash_info[5], (unsigned)crash_info[7]);
-    watchdog_reboot(0, 0, 500);
-    while (1) tight_loop_contents();
+    busy_wait_ms(500);
+    platform_reboot(false);
 }
 
 void __attribute__((naked, used)) isr_hardfault(void) {

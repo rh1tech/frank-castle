@@ -4,6 +4,7 @@
 #
 #   tools/uart.py cap SECONDS [OUT]          capture to OUT (default stdout)
 #   tools/uart.py send "SEQ" [SECONDS OUT]   play SEQ, optionally capture meanwhile
+#   tools/uart.py bootsel                    ask the firmware to reboot into BOOTSEL
 #
 # SEQ is space separated:  KEY | KEY*FRAMES (hold) | wMS (wait)
 #   keys: w a s d (d-pad)  x z c v (cross square circle triangle)
@@ -58,6 +59,11 @@ def play(fd, seq):
 
 
 def main():
+    if len(sys.argv) == 2 and sys.argv[1] == "bootsel":
+        fd = open_port()
+        os.write(fd, b"~BOOT~")
+        time.sleep(0.2)
+        return
     if len(sys.argv) < 3:
         sys.exit(__doc__ if __doc__ else "usage: uart.py cap|send ...")
     fd = open_port()

@@ -22,6 +22,7 @@
 #include "cd_fatfs.h"
 #include "disc_provider.h"
 #include "ff.h"
+#include "diskio.h"
 
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
@@ -70,7 +71,10 @@ static void __attribute__((noreturn)) fatal(const char *what, const char *detail
     fbcon_puts(&con, what);
     fbcon_puts(&con, "\n\n  ");
     fbcon_puts(&con, detail);
-    while (1) tight_loop_contents();
+    while (1) {
+        int ch = getchar_timeout_us(1000);
+        if (ch >= 0) platform_uart_cmd(ch); /* ~BOOT~ still works here */
+    }
 }
 
 static bool find_cue(char *out, size_t outlen) {
@@ -126,7 +130,15 @@ int main(void) {
     static char cue[160];
     if (!find_cue(cue, sizeof(cue)))
         fatal("Game disc not found", "copy the SLUS-00067 .cue/.bin to /castle/");
-    if (!DiscProvider_Mount(&cd_fatfs_backend, cue)) fatal("Cannot read the disc image", cue);
+    /* SD cards occasionally drop out right after a warm reset (or when a USB
+     * device enumerates): re-initialise the card and mount again. */
+    for (int attempt = 0; !DiscProvider_Mount(&cd_fatfs_backend, cue); attempt++) {
+        if (attempt == 3) fatal("Cannot read the disc image", cue);
+        printf("disc mount failed, re-initialising the SD card (%d)\n", attempt + 1);
+        sleep_ms(200 << attempt);
+        disk_initialize(0);
+        platform_mount_sd();
+    }
 
     static char args_buf[256];
     static char *argv[16] = {"sotn", "--disk", cue};

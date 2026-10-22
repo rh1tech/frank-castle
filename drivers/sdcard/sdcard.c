@@ -462,7 +462,11 @@ DRESULT disk_read (
 	if (drv || !count) return RES_PARERR;		/* Check parameter */
 	for (int attempt = 0; attempt < 5; attempt++) {
 		if (Stat & STA_NOINIT) disk_initialize(0);
-		if (Stat & STA_NOINIT) continue;
+		if (Stat & STA_NOINIT) {
+			printf("sd: card init failed, retry %d\n", attempt + 1);
+			sleep_ms(20 << attempt);
+			continue;
+		}
 		if (disk_read_once(buff, sector, count) == RES_OK) return RES_OK;
 		sd_retries++;
 		printf("sd: read %lu+%u failed (crc %lu, token %lu), retry %d\n", (unsigned long)sector, count,

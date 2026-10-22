@@ -67,6 +67,14 @@ static void *fat_open(const char *path) {
                 printf("cd_fatfs: %s is in %lu fragments\n", path, (unsigned long)(need - 1) / 2);
             }
         }
+        if (fr == FR_DISK_ERR) {
+            /* the card stopped answering: let the caller re-mount and retry */
+            printf("cd_fatfs: %s: disk error while mapping clusters\n", path);
+            f_close(&h->fil);
+            if (h->big_clmt) psram_free(h->big_clmt);
+            h->big_clmt = NULL;
+            return NULL;
+        }
         if (fr != FR_OK) {
             printf("cd_fatfs: no fast-seek map for %s (%d)\n", path, fr);
             h->fil.cltbl = NULL;

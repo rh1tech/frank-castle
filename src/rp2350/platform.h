@@ -38,4 +38,7 @@ static inline uint32_t platform_cyccnt(void) {
     return *(volatile uint32_t *)0xE0001004;
 }
 
+void __attribute__((noreturn)) platform_reboot(bool bootsel);
+void platform_uart_cmd(int ch);
+
 #endif /* PLATFORM_H */

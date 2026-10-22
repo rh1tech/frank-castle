@@ -222,6 +222,7 @@ add_executable(frank-castle
     src/psyz_rp2350/platform.c
     src/psyz_rp2350/module_static.c
     src/rp2350/profiler.c
+    src/rp2350/fs_syscalls.c
     ${CMAKE_BINARY_DIR}/castle_modules.c
     $<TARGET_OBJECTS:sotn_core>
     $<TARGET_OBJECTS:psyz_core>

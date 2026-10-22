@@ -217,9 +217,12 @@ static const struct {
 
 static unsigned uart_pad_bits(void) {
     int ch;
-    while ((ch = getchar_timeout_us(0)) >= 0)
+    extern void platform_uart_cmd(int ch);
+    while ((ch = getchar_timeout_us(0)) >= 0) {
+        platform_uart_cmd(ch);
         for (unsigned i = 0; i < sizeof(uart_map) / sizeof(uart_map[0]); i++)
             if (uart_map[i].c == (char)ch) uart_hold[uart_map[i].bit] = UART_HOLD;
+    }
     unsigned bits = 0;
     for (int b = 0; b < 16; b++)
         if (uart_hold[b]) {
