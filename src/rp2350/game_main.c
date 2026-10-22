@@ -31,7 +31,7 @@
 
 extern int sotn_main(int argc, char *argv[]);
 extern bool InitPlatform(void);
-extern unsigned short vram[1024 * 512];
+extern unsigned short g_PsxVram[1024 * 512];
 
 extern void PsxVideo_Core1Loop(void);
 
@@ -56,7 +56,7 @@ static void core1_main(void) {
 static void __attribute__((noreturn)) fatal(const char *what, const char *detail) {
     printf("FATAL: %s: %s\n", what, detail);
     fbcon_t con;
-    fbcon_init(&con, vram, 320, 240, 1024);
+    fbcon_init(&con, g_PsxVram, 320, 240, 1024);
     fbcon_clear(&con);
     con.fg = BGR555(255, 80, 80);
     fbcon_puts(&con, "\n  frank-castle\n\n  ");

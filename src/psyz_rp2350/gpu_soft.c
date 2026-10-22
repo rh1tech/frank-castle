@@ -614,6 +614,10 @@ const DrawBackend software_rasterizer = {
 };
 
 /* ------------------------------------------------------------------ */
+/* profiling: microseconds spent rasterizing / moving VRAM, read by video.c */
+#include "pico/time.h"
+volatile uint32_t gpu_prim_us, gpu_vram_us, gpu_prims;
+
 /* frank-castle: psyz Draw_* hooks -> the software rasterizer.         */
 /* Display state (Draw_Display*, Draw_SetDisplayMode) is in video.c.   */
 /* ------------------------------------------------------------------ */
@@ -632,14 +636,20 @@ int Draw_SetHorizontalGrid(unsigned int source_width, unsigned int target_width)
 }
 void Draw_SetMask(int bit0, int bit1) { Software_SetMask(bit0, bit1); }
 void Draw_ClearImage(PS1_RECT* rect, u_char r, u_char g, u_char b) {
-    Software_ClearImage(rect, r, g, b);
+    uint64_t t0 = time_us_64(); Software_ClearImage(rect, r, g, b); gpu_vram_us += (uint32_t)(time_us_64() - t0);
 }
-void Draw_LoadImage(PS1_RECT* rect, u_long* p) { Software_LoadImage(rect, p); }
-void Draw_StoreImage(PS1_RECT* rect, u_long* p) { Software_StoreImage(rect, p); }
+void Draw_LoadImage(PS1_RECT* rect, u_long* p) { uint64_t t0 = time_us_64(); Software_LoadImage(rect, p); gpu_vram_us += (uint32_t)(time_us_64() - t0); }
+void Draw_StoreImage(PS1_RECT* rect, u_long* p) { uint64_t t0 = time_us_64(); Software_StoreImage(rect, p); gpu_vram_us += (uint32_t)(time_us_64() - t0); }
 void Draw_MoveImage(PS1_RECT* rect, unsigned int x, unsigned int y) {
-    Software_MoveImage(rect, x, y);
+    uint64_t t0 = time_us_64(); Software_MoveImage(rect, x, y); gpu_vram_us += (uint32_t)(time_us_64() - t0);
 }
 void Draw_ResetBuffer(void) {}
 void Draw_FlushBuffer(void) {}
-int Draw_PushPrim(u_long* packets, int max_len) { return Software_PushPrim(packets, max_len); }
+int Draw_PushPrim(u_long* packets, int max_len) {
+    uint64_t t = time_us_64();
+    int r = Software_PushPrim(packets, max_len);
+    gpu_prim_us += (uint32_t)(time_us_64() - t);
+    gpu_prims++;
+    return r;
+}
 int Draw_ExequeSync(void) { return 0; }

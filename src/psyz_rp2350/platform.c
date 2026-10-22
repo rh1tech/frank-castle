@@ -45,6 +45,64 @@ void psyz_log(unsigned int level, const char *file, unsigned int line, const cha
 }
 
 /* ------------------------------------------------------------------ */
+/* Game heap: big blocks (whole files, buffers) in PSRAM, small in SRAM */
+/* ------------------------------------------------------------------ */
+
+#undef malloc
+#undef calloc
+#undef realloc
+#undef free
+/* stdlib.h was read with the castle_* renames in effect: declare the real ones */
+extern void *malloc(size_t);
+extern void *realloc(void *, size_t);
+extern void free(void *);
+extern void *psram_malloc(size_t size);
+extern void *psram_realloc(void *ptr, size_t size);
+extern void psram_free(void *ptr);
+
+#define PSRAM_ALLOC_MIN 4096
+
+static inline bool in_psram(const void *p) {
+    uintptr_t a = (uintptr_t)p;
+    return a >= 0x11000000u && a < 0x11800000u;
+}
+
+void *castle_malloc(size_t n) {
+    void *p = NULL;
+    if (n < PSRAM_ALLOC_MIN) p = malloc(n);
+    if (!p) p = psram_malloc(n);
+    if (!p) printf("castle_malloc(%u) failed\n", (unsigned)n);
+    return p;
+}
+
+void *castle_calloc(size_t n, size_t sz) {
+    void *p = castle_malloc(n * sz);
+    if (p) memset(p, 0, n * sz);
+    return p;
+}
+
+void castle_free(void *p) {
+    if (!p) return;
+    if (in_psram(p))
+        psram_free(p);
+    else
+        free(p);
+}
+
+void *castle_realloc(void *p, size_t n) {
+    if (!p) return castle_malloc(n);
+    if (in_psram(p)) return psram_realloc(p, n);
+    void *q = n < PSRAM_ALLOC_MIN ? realloc(p, n) : NULL;
+    if (q) return q;
+    q = psram_malloc(n);
+    if (q) {
+        memcpy(q, p, n); /* old block is at least as large or smaller: copy n */
+        free(p);
+    }
+    return q;
+}
+
+/* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -100,6 +158,35 @@ static const struct {
     {0x2C, PADselect}, /* Space */
 };
 
+/* Debug UART input: every received byte presses a button for UART_HOLD
+ * frames; sending it again keeps it held (tools/uart.py drives this). */
+#define UART_HOLD 6
+static uint8_t uart_hold[16];
+static const struct {
+    char c;
+    uint8_t bit;
+} uart_map[] = {
+    {'w', 12}, {'s', 14}, {'a', 15}, {'d', 13}, /* d-pad */
+    {'x', 6},  {'z', 7},  {'c', 5},  {'v', 4},  /* cross square circle triangle */
+    {'q', 2},  {'e', 3},  {'1', 0},  {'3', 1},  /* L1 R1 L2 R2 */
+    {'\r', 11}, {'\n', 11}, {'p', 11},          /* start */
+    {' ', 8},  {'o', 8},                         /* select */
+};
+
+static unsigned uart_pad_bits(void) {
+    int ch;
+    while ((ch = getchar_timeout_us(0)) >= 0)
+        for (unsigned i = 0; i < sizeof(uart_map) / sizeof(uart_map[0]); i++)
+            if (uart_map[i].c == (char)ch) uart_hold[uart_map[i].bit] = UART_HOLD;
+    unsigned bits = 0;
+    for (int b = 0; b < 16; b++)
+        if (uart_hold[b]) {
+            uart_hold[b]--;
+            bits |= 1u << b;
+        }
+    return bits;
+}
+
 void MyPadInit(int mode) { (void)mode; }
 
 void Psyz_PadsPoll(void) {
@@ -111,7 +198,7 @@ void Psyz_PadsPoll(void) {
         else
             key_down[code >> 3] &= (uint8_t)~(1u << (code & 7));
     }
-    unsigned pressed = 0;
+    unsigned pressed = uart_pad_bits();
     for (unsigned i = 0; i < sizeof(key_map) / sizeof(key_map[0]); i++)
         if (key_down[key_map[i].hid >> 3] & (1u << (key_map[i].hid & 7))) pressed |= key_map[i].pad;
 

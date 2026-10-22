@@ -130,6 +130,10 @@ set(SOTN_DEFINES
     VERSION_PC PERMUTER NON_MATCHING HARD_LINK _internal_version_us __psyz
     PLATFORM_RP2350=1
 )
+# game + psyz heap use goes through castle_malloc (src/psyz_rp2350/platform.c)
+set(SOTN_ALLOC_DEFINES
+    malloc=castle_malloc calloc=castle_calloc realloc=castle_realloc free=castle_free
+)
 set(SOTN_INCLUDES
     ${SOTN_DIR}/include
     ${SOTN_DIR}/src/dra
@@ -148,7 +152,7 @@ set(SOTN_CFLAGS
 
 function(sotn_target_setup target)
     target_include_directories(${target} PRIVATE ${SOTN_INCLUDES})
-    target_compile_definitions(${target} PRIVATE ${SOTN_DEFINES})
+    target_compile_definitions(${target} PRIVATE ${SOTN_DEFINES} ${SOTN_ALLOC_DEFINES})
     target_compile_options(${target} PRIVATE ${SOTN_CFLAGS})
     # pico_stdlib headers (types, sections) without its sources
     target_link_libraries(${target} PRIVATE pico_base_headers hardware_sync_headers)
@@ -181,7 +185,7 @@ include(cmake/overlays.cmake)
 
 add_executable(frank-castle
     src/rp2350/game_main.c
-    src/psyz_rp2350/gpu_soft.c
+    src/psyz_rp2350/gpu_fast.c
     src/psyz_rp2350/video.c
     src/psyz_rp2350/platform.c
     src/psyz_rp2350/module_static.c
@@ -199,7 +203,7 @@ target_include_directories(frank-castle PRIVATE
 target_compile_definitions(frank-castle PRIVATE ${SOTN_DEFINES})
 target_compile_options(frank-castle PRIVATE -fno-short-enums -funsigned-char
     $<$<COMPILE_LANGUAGE:C>:-Wno-incompatible-pointer-types>)
-target_link_libraries(frank-castle castle_platform hardware_dma pico_multicore pico_sync)
+target_link_libraries(frank-castle castle_platform hardware_dma hardware_xip_cache pico_multicore pico_sync)
 pico_set_linker_script(frank-castle ${CMAKE_CURRENT_SOURCE_DIR}/memmap_castle.ld)
 target_link_options(frank-castle PRIVATE
     -Wl,-L${CMAKE_BINARY_DIR}

@@ -22,12 +22,14 @@
 #include "pico/stdlib.h"
 
 #include <stdio.h>
+#include <stdio.h>
 #include <string.h>
 
 #define VRAM_W 1024
 #define VRAM_H 512
 
-extern u16 vram[VRAM_W * VRAM_H];
+extern u16 g_PsxVram[VRAM_W * VRAM_H];
+#define vram g_PsxVram
 
 /* ---- display state written by the game (core 0) ---- */
 static volatile int disp_x, disp_y;
@@ -210,8 +212,9 @@ extern void Psyz_SpuPullSamples(short *out, int num_frames);
 
 /* Frame statistics, logged every 2 s: game time per frame excluding the
  * vsync wait, worst frame, and frames actually presented per second. */
-static uint64_t stat_t0, stat_work_us;
-static uint32_t stat_frames, stat_worst_us, stat_vblank0;
+static uint64_t stat_t0, stat_work_us, stat_spu_us;
+extern volatile uint32_t gpu_prim_us, gpu_vram_us, gpu_prims, gpu_shadow_us;
+static uint32_t stat_frames, stat_worst_us;
 
 static void frame_stats(uint64_t work_us) {
     stat_work_us += work_us;
@@ -220,13 +223,16 @@ static void frame_stats(uint64_t work_us) {
     uint64_t now = time_us_64();
     if (!stat_t0) {
         stat_t0 = now;
-        stat_vblank0 = vblank_count;
     } else if (now - stat_t0 >= 2000000) {
-        extern volatile uint32_t psxv_late_rows;
-        printf("[perf] %lu fps, game %lu us avg / %lu us worst, late rows %lu\n",
+        printf("[perf] %lu fps, game %lu us avg / %lu worst | raster %lu us (%lu prims) vram %lu us shadow %lu us spu %lu us | late rows %lu\n",
                (unsigned long)(stat_frames * 1000000ull / (now - stat_t0)),
                (unsigned long)(stat_work_us / stat_frames), (unsigned long)stat_worst_us,
+               (unsigned long)(gpu_prim_us / stat_frames), (unsigned long)(gpu_prims / stat_frames),
+               (unsigned long)(gpu_vram_us / stat_frames), (unsigned long)(gpu_shadow_us / stat_frames),
+               (unsigned long)(stat_spu_us / stat_frames),
                (unsigned long)psxv_late_rows);
+        gpu_prim_us = gpu_vram_us = gpu_prims = gpu_shadow_us = 0;
+        stat_spu_us = 0;
         stat_t0 = now;
         stat_frames = 0;
         stat_work_us = 0;
@@ -239,10 +245,14 @@ int Psyz_VideoVSync(int mode) {
     /* horizontal lines since the last vsync, 63.5 us each (NTSC) */
     int lines = (int)(((time_us_64() - last_vsync_us) * 2) / 127) & 0xFFFF;
     if (mode == 0) {
-        frame_stats(time_us_64() - last_vsync_us);
+        extern void Gpu_FlushForDisplay(void);
+        Gpu_FlushForDisplay();
+        uint64_t t_spu = time_us_64();
         Psyz_AudioLock();
         Psyz_SpuPullSamples(spu_frame, SPU_FRAMES_PER_VSYNC);
         Psyz_AudioUnlock();
+        stat_spu_us += time_us_64() - t_spu;
+        frame_stats(time_us_64() - last_vsync_us);
         if (vsync_mode != PSYZ_VSYNC_LIMITLESS && vsync_mode != PSYZ_VSYNC_OFF) {
             uint32_t now = vblank_count;
             while (vblank_count == now) tight_loop_contents();
