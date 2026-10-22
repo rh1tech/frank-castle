@@ -1,0 +1,211 @@
+/*
+ * frank-castle — Castlevania: Symphony of the Night port for RP2350
+ *
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
+ * https://github.com/rh1tech/frank-castle
+ *
+ * Licensed under the GNU Affero General Public License v3.0 or later.
+ * See LICENSE for the full license text.
+ */
+
+/*
+ * Board bring-up, following frank-fodder's main.c order:
+ * voltage -> flash timings -> sys clock -> PSRAM (once, at the final clock).
+ */
+
+#include "platform.h"
+#include "board_config.h"
+#include "psram_init.h"
+
+#include "pico/stdlib.h"
+#include "hardware/clocks.h"
+#include "hardware/structs/qmi.h"
+#include "hardware/vreg.h"
+#include "hardware/watchdog.h"
+#include "ff.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* Crash capture (survives the watchdog reboot)                        */
+/* ------------------------------------------------------------------ */
+
+static volatile uint32_t __attribute__((section(".uninitialized_data"))) crash_info[12];
+
+#define CRASH_HARDFAULT 0xDEADBEEFu
+#define CRASH_PANIC     0xDEADCAFEu
+
+void __real_panic(const char *fmt, ...);
+
+void __attribute__((noreturn)) __wrap_panic(const char *fmt, ...) {
+    /* TinyUSB host asserts during flaky enumeration are not worth a reboot:
+     * park this core and let the other one keep running. */
+    if (fmt && (strstr(fmt, "Host") || strstr(fmt, "HCD") || strstr(fmt, "tuh") ||
+                strstr(fmt, "EP"))) {
+        while (1) tight_loop_contents();
+    }
+    void *lr;
+    __asm volatile("mov %0, lr" : "=r"(lr));
+    crash_info[0] = CRASH_PANIC;
+    crash_info[1] = (uint32_t)(uintptr_t)lr;
+    crash_info[2] = (uint32_t)(uintptr_t)fmt;
+    crash_info[3] = get_core_num();
+    printf("\n*** PANIC on core %u ***\n", (unsigned)crash_info[3]);
+    if (fmt) {
+        va_list args;
+        va_start(args, fmt);
+        vprintf(fmt, args);
+        va_end(args);
+        printf("\n");
+    }
+    watchdog_reboot(0, 0, 100);
+    while (1) tight_loop_contents();
+}
+
+void __attribute__((used)) HardFault_Handler_C(uint32_t *frame) {
+    crash_info[0] = CRASH_HARDFAULT;
+    crash_info[1] = frame[6]; /* PC */
+    crash_info[2] = frame[5]; /* LR */
+    crash_info[3] = frame[0];
+    crash_info[4] = frame[1];
+    crash_info[5] = *(volatile uint32_t *)0xE000ED28; /* CFSR */
+    crash_info[6] = *(volatile uint32_t *)0xE000ED2C; /* HFSR */
+    crash_info[7] = *(volatile uint32_t *)0xE000ED38; /* BFAR */
+    crash_info[8] = get_core_num();
+    printf("\n*** HARDFAULT core %u PC=0x%08x LR=0x%08x CFSR=0x%08x BFAR=0x%08x ***\n",
+           (unsigned)crash_info[8], (unsigned)crash_info[1], (unsigned)crash_info[2],
+           (unsigned)crash_info[5], (unsigned)crash_info[7]);
+    watchdog_reboot(0, 0, 500);
+    while (1) tight_loop_contents();
+}
+
+void __attribute__((naked, used)) isr_hardfault(void) {
+    __asm volatile(
+        "tst lr, #4\n"
+        "ite eq\n"
+        "mrseq r0, msp\n"
+        "mrsne r0, psp\n"
+        "b HardFault_Handler_C\n");
+}
+
+void platform_report_previous_crash(void) {
+    if (crash_info[0] == CRASH_HARDFAULT) {
+        printf("*** PREVIOUS CRASH (HardFault) core %u ***\n", (unsigned)crash_info[8]);
+        printf("PC=0x%08x LR=0x%08x R0=0x%08x R1=0x%08x\n", (unsigned)crash_info[1],
+               (unsigned)crash_info[2], (unsigned)crash_info[3], (unsigned)crash_info[4]);
+        printf("CFSR=0x%08x HFSR=0x%08x BFAR=0x%08x\n", (unsigned)crash_info[5],
+               (unsigned)crash_info[6], (unsigned)crash_info[7]);
+    } else if (crash_info[0] == CRASH_PANIC) {
+        printf("*** PREVIOUS CRASH (panic) core %u LR=0x%08x ***\n", (unsigned)crash_info[3],
+               (unsigned)crash_info[1]);
+        const char *msg = (const char *)(uintptr_t)crash_info[2];
+        if (msg) printf("Message: %s\n", msg);
+    }
+    crash_info[0] = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Clocks                                                              */
+/* ------------------------------------------------------------------ */
+
+static void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz) {
+    const int clock_hz = cpu_mhz * 1000000;
+    const int max_flash_freq = FLASH_MAX_FREQ_MHZ * 1000000;
+
+    int divisor = (clock_hz + max_flash_freq - (max_flash_freq >> 4) - 1) / max_flash_freq;
+    if (divisor == 1 && clock_hz >= 166000000) divisor = 2;
+
+    int rxdelay = divisor;
+    if (clock_hz / divisor > 100000000 && clock_hz >= 166000000) rxdelay += 1;
+
+    qmi_hw->m[0].timing = 0x60007000 | rxdelay << QMI_M0_TIMING_RXDELAY_LSB |
+                          divisor << QMI_M0_TIMING_CLKDIV_LSB;
+}
+
+uint32_t platform_init_clocks(void) {
+    stdio_init_all();
+    setvbuf(stdout, NULL, _IONBF, 0);
+    printf("\n==== frank-castle %s ====\n", CASTLE_VERSION);
+    if (watchdog_caused_reboot()) printf("(watchdog reboot)\n");
+
+#if CPU_CLOCK_MHZ > 252
+    vreg_disable_voltage_limit();
+    vreg_set_voltage(CPU_VOLTAGE);
+    set_flash_timings(CPU_CLOCK_MHZ);
+    sleep_ms(10);
+#endif
+    if (!set_sys_clock_khz(CPU_CLOCK_MHZ * 1000, false)) {
+        printf("%d MHz unreachable, falling back to 252 MHz\n", CPU_CLOCK_MHZ);
+        set_sys_clock_khz(252 * 1000, true);
+    }
+    /* The UART baud divisor was computed at the boot clock. */
+    stdio_init_all();
+    uint32_t hz = clock_get_hz(clk_sys);
+    printf("sys clock %lu Hz\n", (unsigned long)hz);
+    return hz;
+}
+
+/* ------------------------------------------------------------------ */
+/* PSRAM                                                               */
+/* ------------------------------------------------------------------ */
+
+extern uint8_t __psram_data_start__, __psram_data_end__, __psram_data_load__;
+extern uint8_t __psram_bss_start__, __psram_bss_end__;
+extern void psram_heap_auto_init(void);
+
+unsigned platform_init_psram(void) {
+    uint pin = get_psram_pin();
+    psram_init(pin);
+
+    size_t n = (size_t)(&__psram_data_end__ - &__psram_data_start__);
+    if (n) memcpy(&__psram_data_start__, &__psram_data_load__, n);
+    n = (size_t)(&__psram_bss_end__ - &__psram_bss_start__);
+    if (n) memset(&__psram_bss_start__, 0, n);
+
+    psram_heap_auto_init();
+    printf("PSRAM on CS%u, %u KB static\n", pin,
+           (unsigned)((&__psram_bss_end__ - &__psram_data_start__) / 1024));
+    return pin;
+}
+
+/* ------------------------------------------------------------------ */
+/* USB host                                                            */
+/* ------------------------------------------------------------------ */
+
+extern void usbhid_init(void);
+extern void usbhid_task(void);
+
+static bool usb_pump_cb(repeating_timer_t *rt) {
+    (void)rt;
+    usbhid_task();
+    return true;
+}
+
+void platform_init_usb(void) {
+    static repeating_timer_t timer;
+    usbhid_init();
+    add_repeating_timer_us(-1000, usb_pump_cb, NULL, &timer);
+}
+
+/* ------------------------------------------------------------------ */
+/* SD card                                                             */
+/* ------------------------------------------------------------------ */
+
+int platform_mount_sd(void) {
+    static FATFS fs;
+    FRESULT fr = FR_NOT_READY;
+    for (int attempt = 0; attempt < 6 && fr != FR_OK; attempt++) {
+        fr = f_mount(&fs, "", 1);
+        if (fr != FR_OK) sleep_ms(50 << attempt);
+    }
+    printf("SD mount: %d\n", fr);
+    return fr;
+}
+
+void platform_cyccnt_enable(void) {
+    *(volatile uint32_t *)0xE000EDFC |= (1u << 24); /* DEMCR.TRCENA */
+    *(volatile uint32_t *)0xE0001004 = 0;           /* CYCCNT */
+    *(volatile uint32_t *)0xE0001000 |= 1u;         /* DWT_CTRL.CYCCNTENA */
+}

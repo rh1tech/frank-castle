@@ -1,0 +1,7 @@
+build/
+release/
+.DS_Store
+# game data is never committed
+*.bin
+*.cue
+*.mcd
