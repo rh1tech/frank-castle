@@ -291,7 +291,7 @@ static inline void put_flat(u16* dst, int r8, int g8, int b8, int semi,
 #endif
     int r = r8 >> 3, g = g8 >> 3, b = b8 >> 3;
     if (semi) {
-        *dst = blend5551(*dst, r, g, b, abr);
+        *dst = blend555(*dst, (u16)(r | (g << 5) | (b << 10)), abr);
     } else {
         *dst = (u16)(r | (g << 5) | (b << 10));
     }
@@ -383,7 +383,37 @@ typedef struct {
         }                                                                       \
     }
 
-DEF_SPAN_TF(span_tf4, TEXEL4)
+DEF_SPAN_TF(span_tf4_gen, TEXEL4)
+
+// Scaled but unrotated 4bpp spans (vdx == 0: the texture row is the same for
+// the whole span): the row pointer is computed once and a halfword serves up
+// to four texels. Same sampling as the general loop.
+SOFT_RASTER_IRAM static void span_tf4(u16* dst, int n, int32_t ui, int32_t vi,
+                                      const SpanCtx* c) {
+    if (c->vdx != 0) {
+        span_tf4_gen(dst, n, ui, vi, c);
+        return;
+    }
+    const u16* trow = c->page + ((vi >> 16) & 0xFF) * VRAM_PITCH;
+    const u16 *clut = c->clut, *lr = c->lr, *lg = c->lg, *lb = c->lb;
+    int32_t udx = c->udx;
+    int semi = c->semi, neutral = c->neutral;
+    int hw_idx = -1;
+    u16 hw = 0;
+    for (; n > 0; n--, dst++, ui += udx) {
+        int u = (ui >> 16) & 0xFF;
+        if ((u >> 2) != hw_idx) {
+            hw_idx = u >> 2;
+            hw = TEX_RD(&trow[hw_idx]);
+        }
+        u16 texel = clut[(hw >> ((u & 3) * 4)) & 0xF];
+        if (!texel) continue;
+        u16 m = neutral ? (u16)(texel & 0x7FFF)
+                        : (u16)(lr[texel & 0x1F] | lg[(texel >> 5) & 0x1F] | lb[(texel >> 10) & 0x1F]);
+        if (semi && (texel & 0x8000)) *dst = blend555(*dst, m, c->abr);
+        else *dst = (u16)(m | (texel & 0x8000));
+    }
+}
 DEF_SPAN_TF(span_tf8, TEXEL8)
 DEF_SPAN_TF(span_tf15, TEXEL15)
 DEF_SPAN_TG(span_tg4, TEXEL4)
