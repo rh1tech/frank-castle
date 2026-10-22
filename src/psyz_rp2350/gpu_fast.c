@@ -38,6 +38,8 @@ u16 g_PsxVram[VRAM_W * VRAM_H] __attribute__((section(".psram_bss.vram"), aligne
 static u16 shadow_buf[SHADOW_PIXELS] __attribute__((aligned(4)));
 static struct {
     int x0, y0, w, h;
+    int sw;  /* row stride in pixels, even */
+    int pad; /* x0 & 1: pixel (x,y) keeps the address parity it has in VRAM */
     bool bound;  /* DROW() points into shadow_buf */
     bool loaded; /* shadow holds the area's current content */
     bool dirty;  /* shadow is newer than PSRAM */
@@ -45,7 +47,8 @@ static struct {
 static u16 *shadow_origin; /* shadow_origin + y*w + x == pixel (x,y) */
 volatile uint32_t gpu_shadow_us;
 
-#define DROW(y) (sh.bound ? shadow_origin + (y) * sh.w : g_PsxVram + (y) * VRAM_W)
+#define DROW(y) (sh.bound ? shadow_origin + (y) * sh.sw : g_PsxVram + (y) * VRAM_W)
+#define SROW(j) (shadow_buf + sh.pad + (j) * sh.sw) /* shadow row j, first pixel */
 
 static bool rect_overlaps(int x, int y, int w, int h) {
     return sh.bound && x < sh.x0 + sh.w && x + w > sh.x0 && y < sh.y0 + sh.h && y + h > sh.y0;
@@ -84,7 +87,7 @@ static void shadow_flush(void) {
     for (int j = 0; j < sh.h; j++) {
         u16 *row = g_PsxVram + (sh.y0 + j) * VRAM_W + sh.x0;
         row_cache_sync(row, sh.w, true);
-        copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), shadow_buf + j * sh.w, sh.w);
+        copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), SROW(j), sh.w);
     }
     sh.dirty = false;
     gpu_shadow_us += (uint32_t)(time_us_64() - t);
@@ -95,7 +98,7 @@ static void shadow_load(void) {
     for (int j = 0; j < sh.h; j++) {
         const u16 *row = g_PsxVram + (sh.y0 + j) * VRAM_W + sh.x0;
         row_cache_sync(row, sh.w, false);
-        copy_px(shadow_buf + j * sh.w, (const u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), sh.w);
+        copy_px(SROW(j), (const u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), sh.w);
     }
     sh.loaded = true;
     sh.dirty = false;
@@ -111,17 +114,20 @@ static void shadow_unbind(void) {
 static bool shadow_bind_rect(int x, int y, int w, int h) {
     if (sh.bound && sh.x0 == x && sh.y0 == y && sh.w == w && sh.h == h) return true;
     shadow_unbind();
+    int pad = x & 1, sw = (w + pad + 1) & ~1;
     if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > VRAM_W || y + h > VRAM_H ||
-        w * h > SHADOW_PIXELS)
+        sw * h > SHADOW_PIXELS)
         return false;
     sh.x0 = x;
     sh.y0 = y;
     sh.w = w;
     sh.h = h;
+    sh.sw = sw;
+    sh.pad = pad;
     sh.bound = true;
     sh.loaded = false;
     sh.dirty = false;
-    shadow_origin = shadow_buf - y * w - x;
+    shadow_origin = shadow_buf + pad - y * sw - x;
     return true;
 }
 
@@ -201,8 +207,7 @@ void Draw_ClearImage(PS1_RECT *rect, u_char r, u_char g, u_char b) {
         /* fill the shadow; PSRAM only for any part of rect outside it */
         u16 c = (u16)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10));
         uint32_t c2 = c | ((uint32_t)c << 16), *p = (uint32_t *)shadow_buf;
-        for (int i = 0; i < sh.w * sh.h / 2; i++) p[i] = c2;
-        if (sh.w * sh.h & 1) shadow_buf[sh.w * sh.h - 1] = c;
+        for (int i = 0; i < sh.sw * sh.h / 2 + 1; i++) p[i] = c2;
         sh.loaded = true;
         sh.dirty = true;
         clut_cache_flush();

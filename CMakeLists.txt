@@ -200,7 +200,8 @@ target_include_directories(frank-castle PRIVATE
     ${SOTN_DIR}/src/pc
     src/psyz_rp2350
 )
-target_compile_definitions(frank-castle PRIVATE ${SOTN_DEFINES})
+set(CASTLE_ARGS "" CACHE STRING "Default extra game arguments, e.g. --stage nz0 (/castle/args.txt overrides)")
+target_compile_definitions(frank-castle PRIVATE ${SOTN_DEFINES} CASTLE_ARGS="${CASTLE_ARGS}")
 target_compile_options(frank-castle PRIVATE -fno-short-enums -funsigned-char
     $<$<COMPILE_LANGUAGE:C>:-Wno-incompatible-pointer-types>)
 target_link_libraries(frank-castle castle_platform hardware_dma hardware_xip_cache pico_multicore pico_sync)

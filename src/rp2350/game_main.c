@@ -83,14 +83,19 @@ static bool find_cue(char *out, size_t outlen) {
     return false;
 }
 
-/* Split /castle/args.txt into argv entries (whitespace separated). */
+/* Split /castle/args.txt (or the CASTLE_ARGS build default) into argv
+ * entries, whitespace separated. */
 static int read_extra_args(char *buf, size_t len, char **argv, int max) {
     FIL f;
     UINT got = 0;
-    if (f_open(&f, "/castle/args.txt", FA_READ) != FR_OK) return 0;
-    f_read(&f, buf, (UINT)len - 1, &got);
-    f_close(&f);
-    buf[got] = 0;
+    if (f_open(&f, "/castle/args.txt", FA_READ) == FR_OK) {
+        f_read(&f, buf, (UINT)len - 1, &got);
+        f_close(&f);
+        buf[got] = 0;
+    } else {
+        strncpy(buf, CASTLE_ARGS, len - 1);
+        buf[len - 1] = 0;
+    }
     int n = 0;
     for (char *tok = strtok(buf, " \t\r\n"); tok && n < max; tok = strtok(NULL, " \t\r\n"))
         argv[n++] = tok;
