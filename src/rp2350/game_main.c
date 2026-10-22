@@ -99,10 +99,35 @@ static bool find_cue(char *out, size_t outlen) {
 
 /* Split /castle/args.txt (or the CASTLE_ARGS build default) into argv
  * entries, whitespace separated. */
+/* Test scripts: "~ARGS <arguments>~" on the UART within ~1.5 s of boot
+ * replaces the game arguments for this run (e.g. "~ARGS --stage no0~"). */
+static bool uart_args(char *buf, size_t len) {
+    static const char tag[] = "~ARGS ";
+    size_t pos = 0, n = 0;
+    absolute_time_t end = make_timeout_time_ms(1500);
+    while (!time_reached(end)) {
+        int ch = getchar_timeout_us(1000);
+        if (ch < 0) continue;
+        if (pos < sizeof(tag) - 1) {
+            pos = ch == tag[pos] ? pos + 1 : (ch == tag[0]);
+            continue;
+        }
+        if (ch == '~') {
+            buf[n] = 0;
+            printf("args from UART: %s\n", buf);
+            return true;
+        }
+        if (n + 1 < len) buf[n++] = (char)ch;
+    }
+    return false;
+}
+
 static int read_extra_args(char *buf, size_t len, char **argv, int max) {
     FIL f;
     UINT got = 0;
-    if (f_open(&f, "/castle/args.txt", FA_READ) == FR_OK) {
+    if (uart_args(buf, len)) {
+        /* given on the UART */
+    } else if (f_open(&f, "/castle/args.txt", FA_READ) == FR_OK) {
         f_read(&f, buf, (UINT)len - 1, &got);
         f_close(&f);
         buf[got] = 0;

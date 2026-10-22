@@ -61,6 +61,15 @@ void platform_uart_cmd(int ch) {
         sleep_ms(20);
         platform_reboot(true);
     }
+    /* "~RST~": plain reboot (test scripts restart the game this way) */
+    static const char rst[] = "~RST~";
+    static unsigned rpos;
+    rpos = (ch == rst[rpos]) ? rpos + 1 : (ch == rst[0]);
+    if (rpos == sizeof(rst) - 1) {
+        printf("\nrebooting\n");
+        sleep_ms(20);
+        platform_reboot(false);
+    }
     /* "~VERB~": toggle the detailed perf log */
     static const char verb[] = "~VERB~";
     static unsigned vpos;

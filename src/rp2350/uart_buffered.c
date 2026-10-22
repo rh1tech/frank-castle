@@ -7,9 +7,11 @@
  *
  * The SDK's UART stdio blocks until every byte is on the wire: a 1 KB perf
  * report at 115200 baud stalls the game for ~90 ms, five or six frames.
- * Output goes into a ring instead, drained by a 1 ms timer interrupt into the
- * UART's 32-byte FIFO. When the ring is full, or interrupts are off (crash
- * handlers), writes fall back to blocking so nothing is lost.
+ * Output goes into a ring instead, drained into the UART's 32-byte FIFO by
+ * the UART's own TX interrupt (a repeating alarm did this before, and died
+ * when the alarm pool was also used per frame). When the ring is full, or
+ * interrupts are off (crash handlers), writes fall back to blocking so
+ * nothing is lost.
  */
 
 #include "pico/stdio.h"
@@ -17,13 +19,13 @@
 #include "pico/stdio_uart.h"
 #include "pico/time.h"
 #include "hardware/sync.h"
+#include "hardware/irq.h"
 #include "hardware/uart.h"
 
 #define RING 4096 /* power of two */
 
 static char ring[RING];
 static volatile uint32_t wr, rd;
-static repeating_timer_t drain_timer;
 static uart_inst_t *const u = uart0;
 
 static void drain(void) {
@@ -33,10 +35,19 @@ static void drain(void) {
     }
 }
 
-static bool drain_cb(repeating_timer_t *t) {
-    (void)t;
+/* TX interrupt: the FIFO dropped to its trigger level. Refill it; stop
+ * interrupting once the ring is empty. The PL011 raises the TX interrupt only
+ * as the FIFO level falls, so kick() primes the FIFO by hand. */
+static void __not_in_flash_func(uart_tx_irq)(void) {
     drain();
-    return true;
+    if (rd == wr) uart_get_hw(u)->imsc &= ~UART_UARTIMSC_TXIM_BITS;
+}
+
+static void kick(void) {
+    uint32_t s = save_and_disable_interrupts();
+    drain();
+    if (rd != wr) uart_get_hw(u)->imsc |= UART_UARTIMSC_TXIM_BITS;
+    restore_interrupts(s);
 }
 
 static bool irqs_enabled(void) {
@@ -74,6 +85,7 @@ static void out_chars(const char *buf, int len) {
         if (buf[i] == '\n') put('\r');
         put(buf[i]);
     }
+    kick();
 }
 
 static void out_flush(void) {
@@ -102,7 +114,10 @@ static stdio_driver_t buffered_uart = {
 void uart_buffered_init(void) {
     stdio_set_driver_enabled(&stdio_uart, false);
     stdio_set_driver_enabled(&buffered_uart, true);
-    add_repeating_timer_us(-1000, drain_cb, NULL, &drain_timer);
+    int irq = u == uart0 ? UART0_IRQ : UART1_IRQ;
+    irq_set_exclusive_handler(irq, uart_tx_irq);
+    uart_get_hw(u)->imsc &= ~UART_UARTIMSC_TXIM_BITS;
+    irq_set_enabled(irq, true);
 }
 
 void uart_buffered_flush(void) { out_flush(); }
