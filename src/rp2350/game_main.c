@@ -81,6 +81,13 @@ static void __attribute__((noreturn)) fatal(const char *what, const char *detail
     }
 }
 
+/* The game walked into an area whose stage is not built yet (sim_pc.c). */
+void Platform_StageMissing(const char *name) {
+    static char msg[48];
+    snprintf(msg, sizeof(msg), "stage '%s' is not in this build", name);
+    fatal("Area not available yet", msg);
+}
+
 static bool find_cue(char *out, size_t outlen) {
     FFDIR dir;
     FILINFO fi;
