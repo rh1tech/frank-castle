@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include "sdcard.h"
 
 #include "pico.h"
@@ -265,6 +266,24 @@ int _select (void)	/* 1:OK, 0:Timeout */
 /* Receive a data packet from the MMC                                    */
 /*-----------------------------------------------------------------------*/
 
+/* CRC-16/XMODEM (poly 0x1021, init 0): the SD data-block CRC. The original
+ * driver discarded it; on a marginal link that hands corrupted sectors to
+ * the filesystem silently (frank-castle). */
+static uint16_t crc16_table[256];
+static void crc16_init(void) {
+	for (int i = 0; i < 256; i++) {
+		uint16_t c = (uint16_t)(i << 8);
+		for (int b = 0; b < 8; b++) c = (c & 0x8000) ? (uint16_t)((c << 1) ^ 0x1021) : (uint16_t)(c << 1);
+		crc16_table[i] = c;
+	}
+}
+static uint16_t crc16(const BYTE *p, UINT n) {
+	uint16_t c = 0;
+	while (n--) c = (uint16_t)((c << 8) ^ crc16_table[((c >> 8) ^ *p++) & 0xFF]);
+	return c;
+}
+volatile uint32_t sd_crc_errors, sd_token_errors, sd_retries;
+
 static
 int rcvr_datablock (	/* 1:OK, 0:Error */
 	BYTE *buff,			/* Data buffer */
@@ -279,11 +298,19 @@ int rcvr_datablock (	/* 1:OK, 0:Error */
 		token = xchg_spi(0xFF);
 		/* This loop will take a time. Insert rot_rdq() here for multitask envilonment. */
 	} while (token == 0xFF && _millis() < t + timeout);
-	if(token != 0xFE) return 0;		/* Function fails if invalid DataStart token or timeout */
+	if(token != 0xFE) {		/* invalid DataStart token or timeout */
+		sd_token_errors++;
+		return 0;
+	}
 
 	rcvr_spi_multi(buff, btr);		/* Store trailing data to the buffer */
-	xchg_spi(0xFF); xchg_spi(0xFF);			/* Discard CRC */
-
+	uint16_t crc = (uint16_t)(xchg_spi(0xFF) << 8);
+	crc |= xchg_spi(0xFF);
+	if (!crc16_table[1]) crc16_init();
+	if (crc16(buff, btr) != crc) {
+		sd_crc_errors++;
+		return 0;
+	}
 	return 1;						/* Function succeeded */
 }
 
@@ -421,6 +448,10 @@ DSTATUS disk_status (
 /* Read sector(s)                                                        */
 /*-----------------------------------------------------------------------*/
 
+static DRESULT disk_read_once (BYTE *buff, LBA_t sector, UINT count);
+
+/* Retry reads: a failed or CRC-mismatched block is read again, and after
+ * repeated failures the card is re-initialised (frank-castle). */
 DRESULT disk_read (
 	BYTE drv,		/* Physical drive number (0) */
 	BYTE *buff,		/* Pointer to the data buffer to store read data */
@@ -429,8 +460,20 @@ DRESULT disk_read (
 )
 {
 	if (drv || !count) return RES_PARERR;		/* Check parameter */
-	if (Stat & STA_NOINIT) return RES_NOTRDY;	/* Check if drive is ready */
+	for (int attempt = 0; attempt < 5; attempt++) {
+		if (Stat & STA_NOINIT) disk_initialize(0);
+		if (Stat & STA_NOINIT) continue;
+		if (disk_read_once(buff, sector, count) == RES_OK) return RES_OK;
+		sd_retries++;
+		printf("sd: read %lu+%u failed (crc %lu, token %lu), retry %d\n", (unsigned long)sector, count,
+		       (unsigned long)sd_crc_errors, (unsigned long)sd_token_errors, attempt + 1);
+		if (attempt >= 1) Stat |= STA_NOINIT; /* re-initialise before the next try */
+	}
+	return RES_ERROR;
+}
 
+static DRESULT disk_read_once (BYTE *buff, LBA_t sector, UINT count)
+{
 	if (!(CardType & CT_BLOCK)) sector *= 512;	/* LBA ot BA conversion (byte addressing cards) */
 
 	if (count == 1) {	/* Single sector read */

@@ -141,7 +141,7 @@ set(SOTN_INCLUDES
 )
 # Same relaxations the upstream PC build uses for PS1-matching code.
 set(SOTN_CFLAGS
-    -funsigned-char -fno-short-enums -std=gnu17 -include stdio.h
+    -funsigned-char -fno-short-enums -std=gnu17
     -Wno-missing-braces -Wno-unused-parameter -Wno-unused-function
     -Wno-implicit-function-declaration -Wno-incompatible-pointer-types
     -Wno-int-conversion -Wno-return-mismatch -Wno-return-type
@@ -149,6 +149,27 @@ set(SOTN_CFLAGS
     -Wno-pointer-sign -Wno-parentheses -Wno-char-subscripts
     -Wno-missing-field-initializers -Wno-address-of-packed-member
 )
+
+# sotn_str: the decomp's compiler launcher that re-encodes _S("...") strings
+# into SOTN's text format (FF 00 terminated, game charset). The PC build runs
+# every game/overlay file through it; without it enemy names have no
+# terminator and BottomCornerText walks off the stack.
+find_program(CARGO_BIN cargo REQUIRED)
+set(SOTN_STR_TARGET_DIR "${CMAKE_BINARY_DIR}/sotn_str")
+set(SOTN_STR_BIN "${SOTN_STR_TARGET_DIR}/release/sotn_str")
+add_custom_command(
+    OUTPUT "${SOTN_STR_BIN}"
+    COMMAND ${CMAKE_COMMAND} -E env "CARGO_TARGET_DIR=${SOTN_STR_TARGET_DIR}"
+        "${CARGO_BIN}" build --release --manifest-path "${SOTN_DIR}/tools/sotn_str/Cargo.toml"
+    DEPENDS "${SOTN_DIR}/tools/sotn_str/Cargo.toml" "${SOTN_DIR}/tools/sotn_str/src/main.rs"
+    VERBATIM
+    COMMENT "Building host sotn_str")
+add_custom_target(sotn_str_host DEPENDS "${SOTN_STR_BIN}")
+
+function(sotn_str_apply target)
+    add_dependencies(${target} sotn_str_host)
+    set_target_properties(${target} PROPERTIES C_COMPILER_LAUNCHER "${SOTN_STR_BIN};cc")
+endfunction()
 
 function(sotn_target_setup target)
     target_include_directories(${target} PRIVATE ${SOTN_INCLUDES})
@@ -160,6 +181,7 @@ endfunction()
 
 add_library(sotn_core OBJECT ${SOTN_CORE_SOURCES})
 sotn_target_setup(sotn_core)
+sotn_str_apply(sotn_core)
 # the decomp's main() becomes sotn_main(), called from src/rp2350/game_main.c
 set_source_files_properties(${SOTN_DIR}/src/pc/main.c TARGET_DIRECTORY sotn_core
     PROPERTIES COMPILE_DEFINITIONS main=sotn_main)
@@ -168,6 +190,8 @@ add_library(psyz_core OBJECT ${PSYZ_CORE_SOURCES}
     ${SOTN_DIR}/tools/psyz/psyz/src/psyz/libgte_sw_sqrt.c
     ${SOTN_DIR}/tools/psyz/psyz/src/psyz/psyz_spu.c)
 sotn_target_setup(psyz_core)
+# psyz's decomp/libgpu/sys.c uses printf without including stdio.h
+target_compile_options(psyz_core PRIVATE -include stdio.h)
 
 add_custom_target(sotn_overlays)
 foreach(ovl ${SOTN_OVERLAYS})
@@ -178,6 +202,7 @@ foreach(ovl ${SOTN_OVERLAYS})
     target_include_directories(ovl_${ovl} PRIVATE
         ${SOTN_DIR}/src/pc ${SOTN_DIR}/src/st/${ovl} ${SOTN_DIR}/src/boss/${ovl})
     target_compile_definitions(ovl_${ovl} PRIVATE OVERLAY_BUILD PSYZ_MODULE_NAME="${ovl}" ${SOTN_OVL_${ovl}_DEFS})
+    sotn_str_apply(ovl_${ovl})
     add_dependencies(sotn_overlays ovl_${ovl})
 endforeach()
 

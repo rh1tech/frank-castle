@@ -46,7 +46,11 @@ static void *fat_open(const char *path) {
     for (int i = 0; i < MAX_HANDLES; i++) {
         handle_t *h = &handles[i];
         if (h->used) continue;
-        if (f_open(&h->fil, path, FA_READ) != FR_OK) return NULL;
+        FRESULT ofr = f_open(&h->fil, path, FA_READ);
+        if (ofr != FR_OK) {
+            printf("cd_fatfs: f_open(%s) failed: %d\n", path, ofr);
+            return NULL;
+        }
         /* Try the small in-handle map first; on FR_NOT_ENOUGH_CORE FatFs
          * leaves the required size in word 0, so allocate exactly that. */
         h->big_clmt = NULL;
@@ -78,7 +82,8 @@ static uint32_t fat_read(void *handle, uint64_t offset, void *buf, uint32_t len)
     if (f_lseek(&h->fil, (FSIZE_t)offset) != FR_OK) return 0;
     if (in_sram(buf)) {
         UINT got = 0;
-        f_read(&h->fil, buf, len, &got);
+        FRESULT rfr = f_read(&h->fil, buf, len, &got);
+        if (rfr != FR_OK) printf("cd_fatfs: f_read failed: %d\n", rfr);
         return got;
     }
     uint8_t *out = buf;
