@@ -253,6 +253,16 @@ static void frame_stats(uint64_t work_us) {
     stat_work_us += work_us;
     if (work_us > stat_worst_us) stat_worst_us = (uint32_t)work_us;
     stat_frames++;
+#ifdef CASTLE_PROFILE
+    {
+        /* profile the first slow-raster frame after boot (stage banners etc.) */
+        extern void profiler_trigger(void);
+        static uint32_t prev_prim;
+        uint32_t pu = gpu_prim_us;
+        if (pu > prev_prim && pu - prev_prim > 8000 && gpu_prims > 100) profiler_trigger();
+        prev_prim = pu;
+    }
+#endif
     uint64_t now = time_us_64();
     if (!stat_t0) {
         stat_t0 = now;

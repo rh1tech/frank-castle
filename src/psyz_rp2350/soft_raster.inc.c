@@ -849,6 +849,24 @@ static int soft_push_prim(u_long* packets, int max_len) {
                 v[i].r = v[i].g = v[i].b = 0x80;
             }
         }
+        // Axis-aligned textured quad with 1:1 texel mapping and one colour
+        // (stage name banner, dissolve strips, HUD panels): identical output
+        // to the two-triangle split, but the sprite loop skips the edge and
+        // attribute stepping and reads 4bpp texels a halfword at a time.
+        if (n == 4 && isTextured && v[0].y == v[1].y && v[2].y == v[3].y &&
+            v[0].x == v[2].x && v[1].x == v[3].x && v[0].u == v[2].u &&
+            v[1].u == v[3].u && v[0].v == v[1].v && v[2].v == v[3].v &&
+            v[1].x > v[0].x && v[2].y > v[0].y &&
+            v[1].u - v[0].u == v[1].x - v[0].x &&
+            v[2].v - v[0].v == v[2].y - v[0].y &&
+            (!isGouraud ||
+             (v[1].r == v[0].r && v[1].g == v[0].g && v[1].b == v[0].b &&
+              v[2].r == v[0].r && v[2].g == v[0].g && v[2].b == v[0].b &&
+              v[3].r == v[0].r && v[3].g == v[0].g && v[3].b == v[0].b))) {
+            raster_sprite(&v[0], v[1].x - v[0].x, v[2].y - v[0].y, tpage, clut,
+                          isSemi);
+            return max_len - len;
+        }
         raster_tri(&v[0], &v[1], &v[2], isTextured, tpage, clut, isSemi,
                    isGouraud);
         if (n == 4) {

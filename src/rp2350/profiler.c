@@ -59,6 +59,14 @@ void profiler_start(void) {
     irq_set_enabled(TIMER1_IRQ_0, true);
 }
 
+/* Start sampling now instead of after PROFILE_DELAY_S (first call wins). */
+void profiler_trigger(void) {
+    static bool triggered;
+    if (triggered) return;
+    triggered = true;
+    start_us = time_us_64();
+}
+
 /* called from the game thread (VSync) */
 void profiler_poll(void) {
     if (!done || printed) return;
