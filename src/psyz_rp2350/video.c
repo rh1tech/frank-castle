@@ -463,7 +463,7 @@ volatile uint32_t psxv_vsync_ret_us; /* time_us_32 when VSync last returned */
 static uint32_t vsync_entry_at_us, vsync_late, vsync_calls; /* timeline (perf log) */
 static uint64_t vsync_entry_us;
 static uint32_t wait_late, wait_late_vsync_us; /* reached the vblank wait after the vblank */
-static uint32_t late_log[8][5]; /* late frames: VSync entry, DrawSync return, core 1 drain, mixing us, SD sectors */
+static uint32_t late_log[8][8]; /* late frames: VSync entry, DrawSync return, core 1 drain, mixing us, SD sectors */
 
 
 /* Frame statistics, logged every 2 s: game time per frame excluding the
@@ -522,9 +522,10 @@ static void frame_stats(uint64_t work_us) {
                    (unsigned long)(vsync_entry_at_us / (vsync_calls ? vsync_calls : 1)), (unsigned long)vsync_late,
                    (unsigned long)vsync_calls, (unsigned long)gpu_tl_frames);
         for (uint32_t k = 0; k < vsync_late && k < 8; k++)
-            PV("[perf] late frame: VSync at %lu, DrawSync done %lu, core 1 drained %lu us, mixing %lu us, %lu SD sectors\n",
+            PV("[perf] late frame: VSync at %lu, DrawSync done %lu, core 1 drained %lu us, mixing %lu us, %lu SD sectors, raster %lu us, core-1 flush %lu us (%lu rows)\n",
                    (unsigned long)late_log[k][0], (unsigned long)late_log[k][1], (unsigned long)late_log[k][2],
-                   (unsigned long)late_log[k][3], (unsigned long)late_log[k][4]);
+                   (unsigned long)late_log[k][3], (unsigned long)late_log[k][4], (unsigned long)late_log[k][5],
+                   (unsigned long)late_log[k][6], (unsigned long)late_log[k][7]);
         if (wait_late)
             PV("[perf] %lu frames reached the vblank wait late, VSync work in them %lu us avg\n",
                    (unsigned long)wait_late, (unsigned long)(wait_late_vsync_us / wait_late));
@@ -554,7 +555,7 @@ static void frame_stats(uint64_t work_us) {
         }
         {
             extern volatile uint32_t flush_maint_us, flush_copy_us, flush_rows_skipped;
-            PV("[perf] slot flush: cache maintenance %lu us, copy %lu us, %lu rows unchanged per frame\n",
+            PV("[perf] slot flush: cache maintenance %lu us, copy %lu us, %lu segments unchanged per frame\n",
                (unsigned long)(flush_maint_us / stat_frames), (unsigned long)(flush_copy_us / stat_frames),
                (unsigned long)(flush_rows_skipped / stat_frames));
             flush_maint_us = flush_copy_us = flush_rows_skipped = 0;
@@ -630,6 +631,10 @@ int Psyz_VideoVSync(int mode) {
                 extern volatile uint32_t audio_frame_us, sd_frame_reads;
                 late_log[vsync_late][3] = audio_frame_us;
                 late_log[vsync_late][4] = sd_frame_reads;
+                extern volatile uint32_t frame_c1flush_us, frame_raster_us, frame_c1flush_rows;
+                late_log[vsync_late][5] = frame_raster_us;
+                late_log[vsync_late][6] = frame_c1flush_us;
+                late_log[vsync_late][7] = frame_c1flush_rows;
             }
             vsync_late++;
         }
@@ -677,6 +682,8 @@ int Psyz_VideoVSync(int mode) {
         {
             extern volatile uint32_t audio_frame_us, sd_frame_reads;
             audio_frame_us = sd_frame_reads = 0;
+            extern volatile uint32_t frame_c1flush_us, frame_raster_us, frame_c1flush_rows;
+            frame_c1flush_us = frame_raster_us = frame_c1flush_rows = 0;
         }
     }
     return lines;

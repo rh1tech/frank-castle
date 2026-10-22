@@ -130,30 +130,33 @@ volatile uint8_t gpu_c1_state;
 
 volatile uint32_t flush_maint_us, flush_copy_us, flush_rows_skipped; /* diagnostic */
 
-/* What each VRAM row in PSRAM last received from a slot flush: x range and
- * a hash of the pixels. Title and menu screens redraw the same backdrop every
- * frame, and with double buffering a PSRAM buffer was written two frames
- * ago with (mostly) the same rows: those are skipped instead of copied.
- * Anything else writing PSRAM VRAM forgets the rows it touches
- * (vrow_forget). */
-static uint32_t vrow_hash[VRAM_H];
-static uint16_t vrow_x0[VRAM_H], vrow_w[VRAM_H]; /* w == 0: unknown */
+/* What each 64-pixel segment of each VRAM row in PSRAM last received from a
+ * slot flush: the writing rectangle's signature (x0 << 16 | w, 0: unknown)
+ * and a hash of the pixels. Title and menu screens redraw the same backdrop
+ * every frame, and with double buffering a PSRAM buffer was written two
+ * frames ago with mostly the same content: unchanged segments are skipped
+ * (the title's animated overlays cover only part of each row). Anything
+ * else writing PSRAM VRAM forgets the segments it touches (vrow_forget).
+ * The tables live in PSRAM: a few accesses per row, and SRAM is full. */
+#define SEG_PX 64
+#define SEGS (VRAM_W / SEG_PX)
+static uint32_t seg_hash[VRAM_H][SEGS] __attribute__((section(".psram_bss.seghash")));
+static uint32_t seg_sig[VRAM_H][SEGS] __attribute__((section(".psram_bss.seghash")));
 
 static void vrow_forget(int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (h > VRAM_H) h = VRAM_H;
+    int k0 = x < 0 ? 0 : x / SEG_PX, k1 = (x + w - 1) / SEG_PX;
+    if (k1 >= SEGS) k1 = SEGS - 1;
     for (int j = 0; j < h; j++) {
         int r = (y + j) & (VRAM_H - 1);
-        if (vrow_w[r] && x < vrow_x0[r] + vrow_w[r] && x + w > vrow_x0[r]) vrow_w[r] = 0;
+        for (int k = k0; k <= k1; k++) seg_sig[r][k] = 0;
     }
 }
 
-static inline uint32_t row_hash(const u16 *p, int n) {
-    const uint32_t *q = (const uint32_t *)p;
+static inline uint32_t seg_hash16(const u16 *p, int n) {
     uint32_t h = 2166136261u ^ (uint32_t)n;
-    int k = 0;
-    for (; k + 1 < n; k += 2) h = (h ^ *q++) * 16777619u;
-    if (n & 1) h = (h ^ p[n - 1]) * 16777619u;
+    for (int k = 0; k < n; k++) h = (h ^ p[k]) * 16777619u;
     return h;
 }
 
@@ -161,30 +164,32 @@ static inline uint32_t row_hash(const u16 *p, int n) {
  * PSRAM stalls the DMA master on every write and the HSTX channels with it
  * (tried: 2.5x faster copy, no HDMI signal). */
 static void flush_rows(Slot *s, int jfrom, int jto) {
-    bool hashable = !(((uintptr_t)s->base) & 3) && !(s->sw & 1);
+    uint32_t sig = (uint32_t)s->x0 << 16 | (uint32_t)s->w;
+    int xend = s->x0 + s->w;
     for (int j = jfrom; j < jto; j++) {
         int vy = (s->y0 + j) & (VRAM_H - 1);
-        u16 *row = g_PsxVram + vy * VRAM_PITCH + s->x0;
-        const u16 *src = s->base + j * s->sw;
+        u16 *row = g_PsxVram + vy * VRAM_PITCH;
+        const u16 *src = s->base + j * s->sw - s->x0; /* src[x] = pixel (x, row) */
         if (get_core_num() == 1) Video_ScanSync();
-        if (hashable) {
-            uint32_t h = row_hash(src, s->w);
-            if (vrow_w[vy] == s->w && vrow_x0[vy] == s->x0 && vrow_hash[vy] == h) {
-                flush_rows_skipped++; /* PSRAM already holds exactly this row */
-                continue;
+        for (int xa = s->x0; xa < xend;) {
+            int k = xa / SEG_PX;
+            int xb = (k + 1) * SEG_PX;
+            if (xb > xend) xb = xend;
+            uint32_t h = seg_hash16(src + xa, xb - xa);
+            if (seg_sig[vy][k] == sig && seg_hash[vy][k] == h) {
+                flush_rows_skipped++; /* PSRAM already holds exactly this */
+            } else {
+                seg_sig[vy][k] = sig;
+                seg_hash[vy][k] = h;
+                uint32_t c0 = time_us_32();
+                row_cache_sync(row + xa, xb - xa, true);
+                uint32_t c1 = time_us_32();
+                copy_px((u16 *)((uintptr_t)(row + xa) + PSRAM_UNCACHED_OFFSET), src + xa, xb - xa);
+                flush_maint_us += c1 - c0;
+                flush_copy_us += time_us_32() - c1;
             }
-            vrow_hash[vy] = h;
-            vrow_x0[vy] = (uint16_t)s->x0;
-            vrow_w[vy] = (uint16_t)s->w;
-        } else {
-            vrow_forget(s->x0, vy, s->w, 1);
+            xa = xb;
         }
-        uint32_t c0 = time_us_32();
-        row_cache_sync(row, s->w, true);
-        uint32_t c1 = time_us_32();
-        copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), src, s->w);
-        flush_maint_us += c1 - c0;
-        flush_copy_us += time_us_32() - c1;
     }
 }
 
@@ -197,6 +202,8 @@ static void flush_rows(Slot *s, int jfrom, int jto) {
 static volatile int fl_slot = -1; /* slot whose display flush is in progress */
 static volatile int fl_next;      /* first row not flushed yet */
 static volatile bool fl_core1;    /* core 0 handed the rest to core 1 */
+
+volatile uint32_t frame_c1flush_us, frame_raster_us, frame_c1flush_rows; /* this frame (reset at VSync) */
 
 static void slot_flush_c(Slot *s, int cause) {
     if (!s->used || !s->dirty || !s->loaded) return;
@@ -458,6 +465,7 @@ static void exec_prim(u_long *packets, int len) {
     if (i < 0) vrow_forget(st.x0, st.y0, st.x1 - st.x0 + 1, st.y1 - st.y0 + 1); /* drew into PSRAM */
     uint32_t dt = (uint32_t)(time_us_64() - t);
     gpu_prim_us += dt;
+    frame_raster_us += dt;
     gpu_prims++;
     {
         /* time by primitive class (perf log) */
@@ -711,11 +719,21 @@ bool Gpu_FlushStep(void) {
     return true;
 }
 
-/* Core 0, after the vblank: core 1 finishes what is left. */
+/* Core 0, right after the vblank: finish the flush here. Core 1 is idle
+ * (no commands for the next frame yet) and keeps the scanout fed, so core 0
+ * copies at full speed; the rows left are bottom rows the beam reaches only
+ * ~10 ms later. Handing them to core 1 instead cost twice as long per row
+ * (it interleaves the scanout) and pushed its next frame past vblank. */
 void Gpu_FlushHandOff(void) {
     if (fl_slot < 0) return;
-    __dmb();
-    fl_core1 = true;
+    Slot *s = &slot[fl_slot];
+    uint64_t t = time_us_64();
+    frame_c1flush_rows += s->h - fl_next;
+    flush_rows(s, fl_next, s->h);
+    s->dirty = false;
+    fl_slot = -1;
+    gpu_shadow_us += (uint32_t)(time_us_64() - t);
+    frame_c1flush_us += (uint32_t)(time_us_64() - t);
 }
 
 /* Core 1, before anything else: finish a handed-over display flush. */
@@ -723,9 +741,11 @@ void __not_in_flash_func(Gpu_Core1FlushPending)(void) {
     if (!fl_core1) return;
     Slot *s = &slot[fl_slot];
     uint64_t t = time_us_64();
+    frame_c1flush_rows += s->h - fl_next;
     flush_rows(s, fl_next, s->h);
     s->dirty = false;
     gpu_shadow_us += (uint32_t)(time_us_64() - t);
+    frame_c1flush_us += (uint32_t)(time_us_64() - t);
     fl_slot = -1;
     __dmb();
     fl_core1 = false;
