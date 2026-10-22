@@ -14,8 +14,14 @@ set(PICO_BOARD frank_m2_rp2350b CACHE STRING "Pico board type")
 set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards)
 set(BOARD_VARIANT "M2" CACHE STRING "Board variant (only M2 for now)")
 set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 252, 378, 504")
-set(PSRAM_SPEED "133" CACHE STRING "PSRAM max frequency in MHz: 84, 100, 133, 166")
-set(FLASH_SPEED "66" CACHE STRING "Flash chip max frequency in MHz")
+# Tuned on the dev board with the diag firmware ('r' sweeps the PSRAM read
+# delay, 'f' the flash one, at the current clock). 168 MHz is above the
+# APS6404's 133 MHz rating: it passes the full memory test here with margin
+# on both sides of the read delay window; use 133 if a board misbehaves.
+set(PSRAM_SPEED "168" CACHE STRING "PSRAM max frequency in MHz: 84, 100, 133, 168")
+set(PSRAM_RXDELAY "6" CACHE STRING "PSRAM read sampling delay override (empty: derived from the clock)")
+set(FLASH_SPEED "126" CACHE STRING "Flash chip max frequency in MHz")
+set(FLASH_RXDELAY "5" CACHE STRING "Flash read sampling delay override (empty: derived from the clock)")
 # Native USB is always the keyboard host; debug console is UART0 (GPIO0/1).
 set(USB_HID_ENABLED ON)
 
@@ -79,6 +85,7 @@ set_source_files_properties(drivers/dlmalloc.c PROPERTIES COMPILE_DEFINITIONS
 )
 target_compile_definitions(drivers PUBLIC
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
+    $<$<BOOL:${PSRAM_RXDELAY}>:PSRAM_RXDELAY=${PSRAM_RXDELAY}>
     PSXV_PIN_BASE=12
 )
 
@@ -87,7 +94,9 @@ set(CASTLE_DEFINES
     CPU_CLOCK_MHZ=${CPU_SPEED}
     CPU_VOLTAGE=${CPU_VOLTAGE}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
+    $<$<BOOL:${PSRAM_RXDELAY}>:PSRAM_RXDELAY=${PSRAM_RXDELAY}>
     FLASH_MAX_FREQ_MHZ=${FLASH_SPEED}
+    $<$<BOOL:${FLASH_RXDELAY}>:FLASH_RXDELAY=${FLASH_RXDELAY}>
     PICO_AUDIO_I2S_DATA_PIN=${I2S_DATA_PIN}
     PICO_AUDIO_I2S_CLOCK_PIN_BASE=${I2S_CLK_PIN}
     CASTLE_VERSION="${CASTLE_VERSION}"
@@ -100,6 +109,7 @@ add_library(castle_platform STATIC
     ${SOTN_DIR}/src/pc/cdimage.c
     src/rp2350/platform.c
     src/rp2350/cd_fatfs.c
+    src/rp2350/uart_buffered.c
 )
 target_include_directories(castle_platform PUBLIC src/common src/rp2350 ${SOTN_DIR}/src/pc)
 target_compile_definitions(castle_platform PUBLIC ${CASTLE_DEFINES})

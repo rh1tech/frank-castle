@@ -5,9 +5,9 @@
 #
 #   tools/to_game.py [TIMEOUT_S]
 #
-# Reads the "[perf] slot alloc X,Y WxH" lines to tell where the game is:
-# 512 wide = title (press Start), 384 wide = menus/name entry (Cross, then
-# Start), 256 wide = in game (done).
+# Reads the display mode from the "[perf] ... mode WxH" lines to tell where
+# the game is: 512 wide = title (press Start), 368 wide = menus/name entry
+# (Cross, then Start), 256 wide = in game (done).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import os, re, select, sys, time
@@ -15,7 +15,7 @@ import os, re, select, sys, time
 sys.path.insert(0, os.path.dirname(__file__))
 from uart import open_port, FRAME  # noqa: E402
 
-ALLOC = re.compile(rb"slot alloc \d+,\d+ (\d+)x(\d+)")
+MODE = re.compile(rb"mode (\d+)x(\d+)")
 
 
 def read_for(fd, secs):
@@ -41,14 +41,14 @@ def main():
     fd = open_port()
     end = time.time() + timeout
     while time.time() < end:
-        widths = [int(m.group(1)) for m in ALLOC.finditer(read_for(fd, 2.5))]
-        w = max(widths) if widths else 0
-        if w == 256:  # only gameplay-sized targets in a whole perf window
+        widths = [int(m.group(1)) for m in MODE.finditer(read_for(fd, 2.5))]
+        w = widths[-1] if widths else 0
+        if w == 256:
             print("in game")
             return 0
         if w == 512:
             press(fd, "p")
-        elif w == 384:
+        elif w in (368, 384):
             press(fd, "x")
             read_for(fd, 1.5)
             press(fd, "p")

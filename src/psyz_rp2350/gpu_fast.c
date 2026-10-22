@@ -27,6 +27,7 @@
 #include <string.h>
 #include "internal.h"
 #include "draw.h"
+#include "vram_pitch.h"
 
 #include "hardware/regs/addressmap.h"
 #include "hardware/sync.h"
@@ -35,7 +36,7 @@
 
 typedef long long s64;
 
-u16 g_PsxVram[VRAM_W * VRAM_H] __attribute__((section(".psram_bss.vram"), aligned(64)));
+u16 g_PsxVram[VRAM_PITCH * VRAM_H] __attribute__((section(".psram_bss.vram"), aligned(64)));
 
 /* ---- framebuffer slots ---- */
 /* A half slot stores each row as a complete 320-pixel HDMI line: the draw
@@ -89,7 +90,7 @@ extern void Video_ScanSync(void);
 static inline void scan_poll(void) {
     if (psxv_fill_row <= psxv_beam_row + 10 && psxv_fill_row < 240 && get_core_num() == 1) Video_ScanFill();
 }
-#define DROW(y) (scan_poll(), cur >= 0 ? draw_origin + (y) * draw_sw : g_PsxVram + (y) * VRAM_W)
+#define DROW(y) (scan_poll(), cur >= 0 ? draw_origin + (y) * draw_sw : g_PsxVram + (y) * VRAM_PITCH)
 
 static bool overlaps(const Slot *s, int x, int y, int w, int h) {
     return s->used && x < s->x0 + s->w && x + w > s->x0 && y < s->y0 + s->h && y + h > s->y0;
@@ -133,7 +134,7 @@ static void slot_flush_c(Slot *s, int cause) {
     gpu_flush_cause[cause]++;
     uint64_t t = time_us_64();
     for (int j = 0; j < s->h; j++) {
-        u16 *row = g_PsxVram + (s->y0 + j) * VRAM_W + s->x0;
+        u16 *row = g_PsxVram + (s->y0 + j) * VRAM_PITCH + s->x0;
         if (get_core_num() == 1) Video_ScanSync();
         row_cache_sync(row, s->w, true);
         copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), s->base + j * s->sw, s->w);
@@ -151,7 +152,7 @@ static void slot_load(Slot *s) {
     gpu_flush_cause[CAUSE_LOAD]++;
     uint64_t t = time_us_64();
     for (int j = 0; j < s->h; j++) {
-        const u16 *row = g_PsxVram + (s->y0 + j) * VRAM_W + s->x0;
+        const u16 *row = g_PsxVram + (s->y0 + j) * VRAM_PITCH + s->x0;
         scan_poll();
         row_cache_sync(row, s->w, false);
         copy_px(s->base + j * s->sw, (const u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), s->w);
@@ -255,6 +256,9 @@ static void tex_hook(u16 tpage, u16 clut) {
 }
 #define TEX_HOOK(tpage, clut) tex_hook(tpage, clut)
 
+
+
+
 #define SOFT_RASTER_STANDALONE
 #define SOFT_RASTER_NO_FALLBACK
 #define SOFT_CLUT_CACHE
@@ -348,7 +352,7 @@ static void load_image_fast(const PS1_RECT *r, const u16 *src) {
         return;
     }
     for (int j = 0; j < h; j++) {
-        u16 *row = g_PsxVram + ((r->y + j) & (VRAM_H - 1)) * VRAM_W + r->x;
+        u16 *row = g_PsxVram + ((r->y + j) & (VRAM_H - 1)) * VRAM_PITCH + r->x;
         row_cache_sync(row, w, true);
         copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), src, w);
         src += w;
@@ -357,6 +361,8 @@ static void load_image_fast(const PS1_RECT *r, const u16 *src) {
 
 /* ---- core 1: execution ---- */
 
+/* poly flat, poly tex, poly tex+gouraud, line, sprite, tile; +6 semi */
+volatile uint32_t gpu_class_us[12], gpu_class_n[12], gpu_class_px[12];
 static void exec_prim(u_long *packets, int len) {
     uint64_t t = time_us_64();
     gpu_c1_state = 1;
@@ -367,8 +373,21 @@ static void exec_prim(u_long *packets, int len) {
     }
     draw_into(i);
     soft_push_prim(packets, len);
-    gpu_prim_us += (uint32_t)(time_us_64() - t);
+    uint32_t dt = (uint32_t)(time_us_64() - t);
+    gpu_prim_us += dt;
     gpu_prims++;
+    {
+        /* time by primitive class (perf log) */
+        int code = (int)(packets[0] >> 24) & 0xFF, k;
+        if (!(code & 0x40)) k = (code & TEXTURED) ? ((code & GOURAUD) ? 2 : 1) : 0;
+        else if (!(code & 0x20)) k = 3;
+        else k = (code & TEXTURED) ? 4 : 5;
+        if (code & SEMITRANSP) k += 6;
+        gpu_class_us[k] += dt;
+        gpu_class_n[k]++;
+        gpu_class_px[k] += soft_px;
+        soft_px = 0;
+    }
 }
 
 #define TIMED(call)                                                   \
@@ -438,6 +457,7 @@ static void exec_move(PS1_RECT *rect, int x, int y) {
 
 /* frame timeline (perf log): offsets from the last VSync return */
 volatile uint32_t gpu_sync_at_us, gpu_drain_at_us, gpu_tl_frames;
+volatile uint32_t gpu_last_sync_at, gpu_last_drain_at; /* this frame: DrawSync returned / core 1 drained */
 static volatile uint32_t drain_last;
 extern volatile uint32_t psxv_vsync_ret_us;
 
@@ -645,9 +665,19 @@ int Draw_ExequeSync(void) {
     /* useful work while core 1 finishes the frame: mix the audio now
      * instead of after VSync */
     extern bool Audio_IdleFill(void);
-    while ((gq_head != gq_tail || gq_exec) && Audio_IdleFill()) {
+    extern void Psyz_CdPrefetch(void);
+    /* Music sectors are read from the SD card here, early in the frame and
+     * while core 1 is still drawing, so mixing (here or in VSync) never
+     * waits on the card. Late in the frame neither starts: a read or a mix
+     * step must not push the frame past vblank. The audio ring holds ~80 ms
+     * and VSync tops it up if it ever runs low. */
+    if (time_us_32() - psxv_vsync_ret_us < 9000) Psyz_CdPrefetch();
+    while ((gq_head != gq_tail || gq_exec) && time_us_32() - psxv_vsync_ret_us < 9000 &&
+           Audio_IdleFill()) {
     }
     gpu_fence_c(0);
     gpu_drain_at_us += drain_last;
+    gpu_last_sync_at = time_us_32() - psxv_vsync_ret_us;
+    gpu_last_drain_at = drain_last;
     return 0;
 }

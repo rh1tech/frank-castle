@@ -39,6 +39,8 @@
  * first, or the boot ROM cannot read the flash and the chip hangs until a
  * power cycle (see psram_reset_to_spi). */
 void __attribute__((noreturn)) platform_reboot(bool bootsel) {
+    extern void uart_buffered_flush(void);
+    uart_buffered_flush(); /* crash reports sit in the ring until drained */
     if (get_core_num() == 0) multicore_reset_core1();
     save_and_disable_interrupts();
     psram_reset_to_spi();
@@ -57,6 +59,15 @@ void platform_uart_cmd(int ch) {
         printf("\nrebooting to BOOTSEL\n");
         sleep_ms(20);
         platform_reboot(true);
+    }
+    /* "~VERB~": toggle the detailed perf log */
+    static const char verb[] = "~VERB~";
+    static unsigned vpos;
+    vpos = (ch == verb[vpos]) ? vpos + 1 : (ch == verb[0]);
+    if (vpos == sizeof(verb) - 1) {
+        extern volatile bool psxv_perf_verbose __attribute__((weak));
+        vpos = 0;
+        if (&psxv_perf_verbose) psxv_perf_verbose = !psxv_perf_verbose;
     }
     /* "~PROF~": profile from now on (profiler builds link profiler_rearm) */
     extern void profiler_rearm(void) __attribute__((weak));
@@ -154,19 +165,28 @@ void platform_report_previous_crash(void) {
 /* Clocks                                                              */
 /* ------------------------------------------------------------------ */
 
-static void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz) {
+/* rxdelay counts half sys clock cycles, so a delay tuned for the final
+ * clock is far too long at the boot clock: the safe timing goes in before
+ * the clock is raised, the fast one after (tools: diag 'f' sweeps it). */
+static void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz, int max_mhz, int rx_override) {
     const int clock_hz = cpu_mhz * 1000000;
-    const int max_flash_freq = FLASH_MAX_FREQ_MHZ * 1000000;
+    const int max_flash_freq = max_mhz * 1000000;
 
     int divisor = (clock_hz + max_flash_freq - (max_flash_freq >> 4) - 1) / max_flash_freq;
     if (divisor == 1 && clock_hz >= 166000000) divisor = 2;
 
     int rxdelay = divisor;
     if (clock_hz / divisor > 100000000 && clock_hz >= 166000000) rxdelay += 1;
+    if (rx_override >= 0) rxdelay = rx_override;
 
     qmi_hw->m[0].timing = 0x60007000 | rxdelay << QMI_M0_TIMING_RXDELAY_LSB |
                           divisor << QMI_M0_TIMING_CLKDIV_LSB;
 }
+
+#ifndef FLASH_RXDELAY
+#define FLASH_RXDELAY -1
+#endif
+#define FLASH_SAFE_MHZ 66
 
 uint32_t platform_init_clocks(void) {
     stdio_init_all();
@@ -177,15 +197,19 @@ uint32_t platform_init_clocks(void) {
 #if CPU_CLOCK_MHZ > 252
     vreg_disable_voltage_limit();
     vreg_set_voltage(CPU_VOLTAGE);
-    set_flash_timings(CPU_CLOCK_MHZ);
+    set_flash_timings(CPU_CLOCK_MHZ, FLASH_SAFE_MHZ, -1);
     sleep_ms(10);
 #endif
     if (!set_sys_clock_khz(CPU_CLOCK_MHZ * 1000, false)) {
         printf("%d MHz unreachable, falling back to 252 MHz\n", CPU_CLOCK_MHZ);
         set_sys_clock_khz(252 * 1000, true);
     }
+    if (FLASH_MAX_FREQ_MHZ > FLASH_SAFE_MHZ)
+        set_flash_timings((int)(clock_get_hz(clk_sys) / 1000000), FLASH_MAX_FREQ_MHZ, FLASH_RXDELAY);
     /* The UART baud divisor was computed at the boot clock. */
     stdio_init_all();
+    extern void uart_buffered_init(void);
+    uart_buffered_init(); /* printf must never stall the game */
     uint32_t hz = clock_get_hz(clk_sys);
     printf("sys clock %lu Hz\n", (unsigned long)hz);
     return hz;

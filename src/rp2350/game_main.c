@@ -22,6 +22,7 @@
 #include "cd_fatfs.h"
 #include "disc_provider.h"
 #include "ff.h"
+#include "vram_pitch.h"
 #include "diskio.h"
 
 #include "pico/multicore.h"
@@ -32,7 +33,7 @@
 
 extern int sotn_main(int argc, char *argv[]);
 extern bool InitPlatform(void);
-extern unsigned short g_PsxVram[1024 * 512];
+extern unsigned short g_PsxVram[];
 
 extern void PsxVideo_Core1Loop(void);
 
@@ -51,6 +52,7 @@ bool Psyz_DisplayOrigin(int *x, int *y) {
 extern void Audio_Init(void);
 
 static void core1_main(void) {
+    platform_cyccnt_enable(); /* core 1's own DWT, for cycle diagnostics */
     psxv_start();
 #if defined(CASTLE_PROFILE) && CASTLE_PROFILE == 2
     extern void profiler_start(void);
@@ -65,7 +67,7 @@ static void core1_main(void) {
 static void __attribute__((noreturn)) fatal(const char *what, const char *detail) {
     printf("FATAL: %s: %s\n", what, detail);
     fbcon_t con;
-    fbcon_init(&con, g_PsxVram, 320, 240, 1024);
+    fbcon_init(&con, g_PsxVram, 320, 240, VRAM_PITCH);
     fbcon_clear(&con);
     con.fg = BGR555(255, 80, 80);
     fbcon_puts(&con, "\n  frank-castle\n\n  ");

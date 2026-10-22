@@ -65,10 +65,15 @@ static u16* const vram = g_PsxVram; // frank-castle: PSRAM VRAM (gpu_fast.c)
 // DROW(y)[x] is VRAM pixel (x,y) -- in the SRAM draw shadow when one is bound
 // (gpu_fast.c), else in PSRAM. TEX_HOOK runs before textures are sampled.
 #ifndef DROW
-#define DROW(y) (vram + (y) * VRAM_W)
+#define DROW(y) (vram + (y) * VRAM_PITCH)
 #endif
 #ifndef TEX_HOOK
 #define TEX_HOOK(tpage, clut)
+#endif
+// frank-castle: every texel read goes through TEX_RD(p) (gpu_fast.c puts a
+// software texture cache in SRAM behind it)
+#ifndef TEX_RD
+#define TEX_RD(p) (*(p))
 #endif
 
 typedef struct {
@@ -94,22 +99,24 @@ typedef struct {
 // 8-way store of recently used CLUTs (4KB DRAM). Texel fetches then cost one
 // PSRAM read instead of two. Any VRAM image op invalidates everything - CLUT
 // uploads and palette animation go through LoadImage.
-static u16 clut_cache[8][256];
-static u16 clut_cache_key[8] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
-                                0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+#ifndef SOFT_CLUT_WAYS
+#define SOFT_CLUT_WAYS 8
+#endif
+static u16 clut_cache[SOFT_CLUT_WAYS][256];
+static u16 clut_cache_key[SOFT_CLUT_WAYS];
 static u8 clut_cache_next;
 static void clut_cache_flush(void) {
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < SOFT_CLUT_WAYS; i++) {
         clut_cache_key[i] = 0xFFFF;
     }
 }
 static inline const u16* clut_cached(u16 id, const u16* src, int n) {
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < SOFT_CLUT_WAYS; i++) {
         if (clut_cache_key[i] == id) {
             return clut_cache[i];
         }
     }
-    int slot = clut_cache_next++ & 7;
+    int slot = clut_cache_next++ % SOFT_CLUT_WAYS;
     memcpy(clut_cache[slot], src, n * sizeof(u16));
     clut_cache_key[slot] = id;
     return clut_cache[slot];
@@ -168,15 +175,17 @@ typedef struct {
     int abr;          // semi-transparency mode from the tpage
 } Tex;
 
+static unsigned soft_px; // pixels spanned (perf counters)
+
 static inline Tex tex_from(u16 tpage, u16 clut) {
     Tex t;
     TEX_HOOK(tpage, clut);
     int px = (tpage & 0xF) * 64;         // halfword units
     int py = ((tpage >> 4) & 1) * 256;
-    t.page = vram + py * VRAM_W + px;
+    t.page = vram + py * VRAM_PITCH + px;
     t.bpp = (tpage >> 7) & 3;
     t.abr = (tpage >> 5) & 3;
-    t.clut = vram + ((clut >> 6) & 0x1FF) * VRAM_W + (clut & 0x3F) * 16;
+    t.clut = vram + ((clut >> 6) & 0x1FF) * VRAM_PITCH + (clut & 0x3F) * 16;
 #ifdef SOFT_CLUT_CACHE
     if (t.bpp <= 1) {
         t.clut = (u16*)clut_cached(clut, t.clut, t.bpp == 0 ? 16 : 256);
@@ -190,15 +199,15 @@ static inline u16 tex_fetch(const Tex* t, int u, int v) {
     v &= 0xFF;
     switch (t->bpp) {
     case 0: { // 4bpp: 4 texels per halfword
-        u16 hw = t->page[v * VRAM_W + (u >> 2)];
+        u16 hw = TEX_RD(&t->page[v * VRAM_PITCH + (u >> 2)]);
         return t->clut[(hw >> ((u & 3) * 4)) & 0xF];
     }
     case 1: { // 8bpp: 2 texels per halfword
-        u16 hw = t->page[v * VRAM_W + (u >> 1)];
+        u16 hw = TEX_RD(&t->page[v * VRAM_PITCH + (u >> 1)]);
         return t->clut[(hw >> ((u & 1) * 8)) & 0xFF];
     }
     default: // 15bpp direct
-        return t->page[v * VRAM_W + u];
+        return TEX_RD(&t->page[v * VRAM_PITCH + u]);
     }
 }
 
@@ -279,7 +288,7 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
         int i = i0;
         if (t.bpp == 0) {
             // 4bpp: one halfword read serves four texels
-            const u16* trow = t.page + tv * VRAM_W;
+            const u16* trow = t.page + tv * VRAM_PITCH;
             // Tilemap fast path: opaque, neutral modulation, u aligned to a
             // halfword. Four texels per source read, pixel pairs written as
             // one 32-bit store. Per-texel semantics are identical to the
@@ -289,7 +298,7 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
                 ((v->u + i0) & 3) == 0 && ((i1 - i0) & 3) == 3) {
                 u16* dst = &row[x0 + i0];
                 for (int n = i0; n <= i1; n += 4) {
-                    u16 hw = trow[((v->u + n) & 0xFF) >> 2];
+                    u16 hw = TEX_RD(&trow[((v->u + n) & 0xFF) >> 2]);
                     u16 a = t.clut[hw & 0xF];
                     u16 b = t.clut[(hw >> 4) & 0xF];
                     u16 c = t.clut[(hw >> 8) & 0xF];
@@ -312,7 +321,7 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
             }
             while (i <= i1) {
                 int u = (v->u + i) & 0xFF;
-                u16 hw = trow[u >> 2];
+                u16 hw = TEX_RD(&trow[u >> 2]);
                 int nib = u & 3;
                 do {
                     put_texel(&row[x0 + i], t.clut[(hw >> (nib * 4)) & 0xF],
@@ -337,16 +346,16 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
                 }
                 lut_key = key;
             }
-            const u16* trow = t.page + tv * VRAM_W;
+            const u16* trow = t.page + tv * VRAM_PITCH;
             u16* dst = &row[x0];
             int u = v->u + i;
             for (; i <= i1; i++, u++) {
                 u16 texel;
                 if (t.bpp == 1) {
-                    u16 hw = trow[(u & 0xFF) >> 1];
+                    u16 hw = TEX_RD(&trow[(u & 0xFF) >> 1]);
                     texel = t.clut[(hw >> ((u & 1) * 8)) & 0xFF];
                 } else {
-                    texel = trow[u & 0xFF];
+                    texel = TEX_RD(&trow[u & 0xFF]);
                 }
                 if (!texel) continue;
                 dst[i] = (u16)(lut_r[texel & 0x1F] | lut_g[(texel >> 5) & 0x1F] |
@@ -413,7 +422,99 @@ SOFT_RASTER_IRAM static void raster_tile(const SV* v, int w, int h, int semi, in
 
 // Triangle with gouraud + affine UV, integer edge functions, top-left rule.
 // 2D game, orthographic: affine interpolation is exact.
+// Span inner loops for the textured triangle paths, one function per texel
+// depth: with the whole triangle setup inlined around it, the per-pixel loop
+// ran out of registers and reloaded half its state from the stack on every
+// pixel. Same stepping and arithmetic as the generic loop: identical output.
+typedef struct {
+    const u16* page;
+    const u16* clut;
+    int32_t udx, vdx, rdx, gdx, bdx;
+    int semi, abr;
+    const u16 *lr, *lg, *lb; // flat modulation tables (exactly mod5(c, col))
+} SpanCtx;
+
+#define TEXEL4 texel = clut[(TEX_RD(&page[v * VRAM_PITCH + (u >> 2)]) >> ((u & 3) * 4)) & 0xF]
+#define TEXEL8 texel = clut[(TEX_RD(&page[v * VRAM_PITCH + (u >> 1)]) >> ((u & 1) * 8)) & 0xFF]
+#define TEXEL15 texel = TEX_RD(&page[v * VRAM_PITCH + u])
+
+#define DEF_SPAN_TF(NAME, FETCH)                                                \
+    SOFT_RASTER_IRAM static void NAME(u16* dst, int n, int32_t ui, int32_t vi, \
+                                      const SpanCtx* c) {                       \
+        const u16 *page = c->page, *clut = c->clut;                             \
+        const u16 *lr = c->lr, *lg = c->lg, *lb = c->lb;                        \
+        int32_t udx = c->udx, vdx = c->vdx;                                     \
+        int semi = c->semi;                                                     \
+        (void)clut;                                                             \
+        for (; n > 0; n--, dst++, ui += udx, vi += vdx) {                       \
+            int u = (ui >> 16) & 0xFF, v = (vi >> 16) & 0xFF;                   \
+            u16 texel;                                                          \
+            FETCH;                                                              \
+            if (!texel) continue;                                               \
+            u16 m = (u16)(lr[texel & 0x1F] | lg[(texel >> 5) & 0x1F] |          \
+                          lb[(texel >> 10) & 0x1F]);                            \
+            if (semi && (texel & 0x8000))                                       \
+                *dst = blend5551(*dst, m & 0x1F, (m >> 5) & 0x1F, m >> 10,      \
+                                 c->abr);                                       \
+            else                                                                \
+                *dst = (u16)(m | (texel & 0x8000));                             \
+        }                                                                       \
+    }
+
+#define DEF_SPAN_TG(NAME, FETCH)                                                \
+    SOFT_RASTER_IRAM static void NAME(u16* dst, int n, int32_t ui, int32_t vi, \
+                                      int32_t ri, int32_t gi, int32_t bi,       \
+                                      const SpanCtx* c) {                       \
+        const u16 *page = c->page, *clut = c->clut;                             \
+        int32_t udx = c->udx, vdx = c->vdx;                                     \
+        int32_t rdx = c->rdx, gdx = c->gdx, bdx = c->bdx;                       \
+        (void)clut;                                                             \
+        for (; n > 0; n--, dst++, ui += udx, vi += vdx, ri += rdx, gi += gdx,   \
+                      bi += bdx) {                                              \
+            int u = (ui >> 16) & 0xFF, v = (vi >> 16) & 0xFF;                   \
+            u16 texel;                                                          \
+            FETCH;                                                              \
+            if (!texel) continue;                                               \
+            int r = ((texel & 0x1F) * (ri >> 16)) >> 7;                         \
+            int g = (((texel >> 5) & 0x1F) * (gi >> 16)) >> 7;                  \
+            int b = (((texel >> 10) & 0x1F) * (bi >> 16)) >> 7;                 \
+            if (r > 31) r = 31;                                                 \
+            if (g > 31) g = 31;                                                 \
+            if (b > 31) b = 31;                                                 \
+            if (c->semi && (texel & 0x8000))                                    \
+                *dst = blend5551(*dst, r, g, b, c->abr);                        \
+            else                                                                \
+                *dst = (u16)(r | (g << 5) | (b << 10) | (texel & 0x8000));      \
+        }                                                                       \
+    }
+
+DEF_SPAN_TF(span_tf4, TEXEL4)
+DEF_SPAN_TF(span_tf8, TEXEL8)
+DEF_SPAN_TF(span_tf15, TEXEL15)
+DEF_SPAN_TG(span_tg4, TEXEL4)
+DEF_SPAN_TG(span_tg8, TEXEL8)
+DEF_SPAN_TG(span_tg15, TEXEL15)
+
+static unsigned tri_c_setup_end; // cycle stamp when span drawing starts (diagnostic)
+unsigned soft_tri_setup_cyc, soft_tri_span_cyc, soft_tri_n;
+#define CYC() (*(volatile unsigned*)0xE0001004)
+SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV* c, int textured,
+                       u16 tpage, u16 clut, int semi, int gouraud);
 SOFT_RASTER_IRAM static void raster_tri(const SV* a, const SV* b, const SV* c, int textured,
+                       u16 tpage, u16 clut, int semi, int gouraud) {
+    unsigned c0 = CYC();
+    tri_c_setup_end = 0;
+    raster_tri_impl(a, b, c, textured, tpage, clut, semi, gouraud);
+    unsigned c1 = CYC();
+    if (tri_c_setup_end) {
+        soft_tri_setup_cyc += tri_c_setup_end - c0;
+        soft_tri_span_cyc += c1 - tri_c_setup_end;
+    } else {
+        soft_tri_setup_cyc += c1 - c0;
+    }
+    soft_tri_n++;
+}
+SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV* c, int textured,
                        u16 tpage, u16 clut, int semi, int gouraud) {
     int ax = a->x + st.ox, ay = a->y + st.oy;
     int bx = b->x + st.ox, by = b->y + st.oy;
@@ -629,6 +730,7 @@ SOFT_RASTER_IRAM static void raster_tri(const SV* a, const SV* b, const SV* c, i
         return;
     }
 
+    tri_c_setup_end = CYC();
     // Textured, one colour (scaled scenery, clouds, rotated
     // sprites): the generic loop below pays tex_fetch's switch plus three
     // multiply-clamps per pixel. Same spans and UV stepping, so the output
@@ -646,6 +748,7 @@ SOFT_RASTER_IRAM static void raster_tri(const SV* a, const SV* b, const SV* c, i
             }
             lkey = key;
         }
+        SpanCtx sc = {t.page, t.clut, udx, vdx, 0, 0, 0, semi, t.abr, lr, lg, lb};
         for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
                  w2row += B2, urow += udy, vrow += vdy) {
             int xl = minx, xr = maxx;
@@ -670,29 +773,57 @@ SOFT_RASTER_IRAM static void raster_tri(const SV* a, const SV* b, const SV* c, i
             if (empty || xl > xr) {
                 continue;
             }
+            soft_px += (unsigned)(xr - xl + 1);
             fx ui = urow + (fx)(xl - minx) * udx;
             fx vi = vrow + (fx)(xl - minx) * vdx;
-            u16* row = DROW(y);
-            for (int x = xl; x <= xr; x++, ui += udx, vi += vdx) {
-                int u = (int)(ui >> 16) & 0xFF, v = (int)(vi >> 16) & 0xFF;
-                const u16* trow = t.page + v * VRAM_W;
-                u16 texel;
-                if (t.bpp == 0) {
-                    texel = t.clut[(trow[u >> 2] >> ((u & 3) * 4)) & 0xF];
-                } else if (t.bpp == 1) {
-                    texel = t.clut[(trow[u >> 1] >> ((u & 1) * 8)) & 0xFF];
+            u16* row = DROW(y) + xl;
+            int n = xr - xl + 1;
+            if (t.bpp == 0) span_tf4(row, n, ui, vi, &sc);
+            else if (t.bpp == 1) span_tf8(row, n, ui, vi, &sc);
+            else span_tf15(row, n, ui, vi, &sc);
+        }
+        return;
+    }
+
+    // Textured + gouraud (lit scenery): same spans and attribute stepping as
+    // the generic loop, with the texel fetch specialised per bpp and the
+    // modulation inlined, so the output is identical.
+    if (textured && gouraud) {
+        SpanCtx sc = {t.page, t.clut, udx, vdx, rdx, gdx, bdx, semi, t.abr, 0, 0, 0};
+        for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
+                 w2row += B2, rrow += rdy, grow += gdy, brow += bdy,
+                 urow += udy, vrow += vdy) {
+            int xl = minx, xr = maxx;
+            int we[3] = {w0row, w1row, w2row};
+            int Ae[3] = {A0, A1, A2};
+            int empty = 0;
+            for (int e = 0; e < 3; e++) {
+                int w = we[e], A = Ae[e];
+                if (A == 0) {
+                    if (w < 0) { empty = 1; break; }
+                } else if (A > 0) {
+                    if (w < 0) {
+                        int x = minx + (-w + A - 1) / A;
+                        if (x > xl) xl = x;
+                    }
                 } else {
-                    texel = trow[u];
-                }
-                if (!texel) continue;
-                u16 m = (u16)(lr[texel & 0x1F] | lg[(texel >> 5) & 0x1F] |
-                              lb[(texel >> 10) & 0x1F]);
-                if (semi && (texel & 0x8000)) {
-                    row[x] = blend5551(row[x], m & 0x1F, (m >> 5) & 0x1F, m >> 10, t.abr);
-                } else {
-                    row[x] = (u16)(m | (texel & 0x8000));
+                    if (w < 0) { empty = 1; break; }
+                    int x = minx + w / (-A);
+                    if (x < xr) xr = x;
                 }
             }
+            if (empty || xl > xr) {
+                continue;
+            }
+            soft_px += (unsigned)(xr - xl + 1);
+            fx d = (fx)(xl - minx);
+            fx ri = rrow + d * rdx, gi = grow + d * gdx, bi = brow + d * bdx;
+            fx ui = urow + d * udx, vi = vrow + d * vdx;
+            u16* row = DROW(y) + xl;
+            int n = xr - xl + 1;
+            if (t.bpp == 0) span_tg4(row, n, ui, vi, ri, gi, bi, &sc);
+            else if (t.bpp == 1) span_tg8(row, n, ui, vi, ri, gi, bi, &sc);
+            else span_tg15(row, n, ui, vi, ri, gi, bi, &sc);
         }
         return;
     }
@@ -810,7 +941,7 @@ static void soft_clear_image(const PS1_RECT* rect, u8 r, u8 g, u8 b) {
     u16 c = (u16)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10));
     int w = vram_clamp_w(rect, "clear"), h = vram_clamp_h(rect);
     for (int y = 0; y < h; y++) {
-        u16* row = vram + ((rect->y + y) & (VRAM_H - 1)) * VRAM_W;
+        u16* row = vram + ((rect->y + y) & (VRAM_H - 1)) * VRAM_PITCH;
         for (int x = 0; x < w; x++) {
             row[(rect->x + x) & (VRAM_W - 1)] = c;
         }
@@ -832,7 +963,7 @@ static void soft_load_image(const PS1_RECT* rect, const u16* src) {
     int w = vram_clamp_w(rect, "load"), h = vram_clamp_h(rect);
     (void)w;
     for (int y = 0; y < h; y++) {
-        u16* dst = vram + ((rect->y + y) & (VRAM_H - 1)) * VRAM_W + rect->x;
+        u16* dst = vram + ((rect->y + y) & (VRAM_H - 1)) * VRAM_PITCH + rect->x;
         memcpy(dst, src, (size_t)rect->w * 2);
         src += rect->w;
     }
@@ -845,7 +976,7 @@ static void soft_store_image(const PS1_RECT* rect, u16* dst) {
           (void*)dst);
     for (int y = 0; y < h; y++) {
         const u16* src =
-            vram + ((rect->y + y) & (VRAM_H - 1)) * VRAM_W + rect->x;
+            vram + ((rect->y + y) & (VRAM_H - 1)) * VRAM_PITCH + rect->x;
         memcpy(dst, src, (size_t)rect->w * 2);
         dst += rect->w;
     }
@@ -865,13 +996,13 @@ static void soft_move_image(const PS1_RECT* rect, int dx, int dy) {
     // memmove per row, walking in the safe direction for overlap
     if (dy <= rect->y) {
         for (int y = 0; y < h; y++) {
-            memmove(vram + (dy + y) * VRAM_W + dx,
-                    vram + (rect->y + y) * VRAM_W + rect->x, (size_t)w * 2);
+            memmove(vram + (dy + y) * VRAM_PITCH + dx,
+                    vram + (rect->y + y) * VRAM_PITCH + rect->x, (size_t)w * 2);
         }
     } else {
         for (int y = h - 1; y >= 0; y--) {
-            memmove(vram + (dy + y) * VRAM_W + dx,
-                    vram + (rect->y + y) * VRAM_W + rect->x, (size_t)w * 2);
+            memmove(vram + (dy + y) * VRAM_PITCH + dx,
+                    vram + (rect->y + y) * VRAM_PITCH + rect->x, (size_t)w * 2);
         }
     }
 }

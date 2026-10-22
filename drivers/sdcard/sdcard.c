@@ -452,6 +452,7 @@ static DRESULT disk_read_once (BYTE *buff, LBA_t sector, UINT count);
 
 /* Retry reads: a failed or CRC-mismatched block is read again, and after
  * repeated failures the card is re-initialised (frank-castle). */
+volatile uint32_t sd_frame_reads; /* sectors read this frame (reset at VSync) */
 DRESULT disk_read (
 	BYTE drv,		/* Physical drive number (0) */
 	BYTE *buff,		/* Pointer to the data buffer to store read data */
@@ -460,6 +461,7 @@ DRESULT disk_read (
 )
 {
 	if (drv || !count) return RES_PARERR;		/* Check parameter */
+	sd_frame_reads += count;
 	for (int attempt = 0; attempt < 5; attempt++) {
 		if (Stat & STA_NOINIT) disk_initialize(0);
 		if (Stat & STA_NOINIT) {

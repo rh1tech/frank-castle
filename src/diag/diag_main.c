@@ -31,6 +31,8 @@
 
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
+#include "hardware/sync.h"
+#include "hardware/structs/qmi.h"
 #include "hardware/clocks.h"
 
 #include <math.h>
@@ -107,6 +109,38 @@ static uint32_t xorshift(uint32_t x) {
 /* Runs before the heap exists: clobbers all 8 MB. Writes and the first
  * verify go through the uncached alias (tests the chip, not the cache);
  * the second verify goes through the cache, as the game will. */
+
+/* Flash timing sweep ('f' on the UART). Runs from SRAM with interrupts off;
+ * reads go through the uncached XIP window, so code in the XIP cache keeps
+ * running while a candidate timing is tried. */
+static uint32_t __no_inline_not_in_flash_func(flash_sum_at)(uint32_t timing) {
+    uint32_t irq = save_and_disable_interrupts();
+    uint32_t saved = qmi_hw->m[0].timing;
+    qmi_hw->m[0].timing = timing;
+    const volatile uint32_t *p = (const volatile uint32_t *)0x14000000u; /* XIP no-cache alias */
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < 65536; i++) sum = sum * 31u + p[i];
+    qmi_hw->m[0].timing = saved;
+    restore_interrupts(irq);
+    return sum;
+}
+
+static void flash_sweep(void) {
+    uint32_t base = qmi_hw->m[0].timing;
+    uint32_t ref = flash_sum_at(base);
+    log_both("flash timing now %08lx\n", (unsigned long)base);
+    static const int divs[] = {6, 5, 4, 3};
+    for (unsigned k = 0; k < sizeof(divs) / sizeof(divs[0]); k++) {
+        log_both("div %d (%d MHz):", divs[k], (int)(clock_get_hz(clk_sys) / 1000000 / divs[k]));
+        for (uint32_t rx = 1; rx < 8; rx++) {
+            uint32_t t = (base & ~(QMI_M0_TIMING_RXDELAY_BITS | QMI_M0_TIMING_CLKDIV_BITS)) |
+                         rx << QMI_M0_TIMING_RXDELAY_LSB | (uint32_t)divs[k] << QMI_M0_TIMING_CLKDIV_LSB;
+            log_both(" rx%lu:%s", (unsigned long)rx, flash_sum_at(t) == ref ? "ok" : "--");
+        }
+        log_both("\n");
+    }
+}
+
 static void psram_test(void) {
     volatile uint32_t *cached = (volatile uint32_t *)0x11000000;
     volatile uint32_t *uncached = (volatile uint32_t *)0x15000000;
@@ -281,6 +315,23 @@ int main(void) {
     uint32_t last_frames = psxv_frame_count;
     uint64_t last_t = time_us_64();
     while (1) {
+        /* UART: "~BOOT~" reboots to BOOTSEL, 'm' re-runs the PSRAM test */
+        int ch = getchar_timeout_us(0);
+        if (ch >= 0) {
+            extern void platform_uart_cmd(int ch);
+            platform_uart_cmd(ch);
+            if (ch == 'm') psram_test();
+            if (ch == 'f') flash_sweep();
+            if (ch == 'r') {
+                /* sweep the PSRAM read sampling delay at the current clock */
+                for (uint32_t d = 0; d < 8; d++) {
+                    uint32_t t = qmi_hw->m[1].timing;
+                    qmi_hw->m[1].timing = (t & ~QMI_M1_TIMING_RXDELAY_BITS) | (d << QMI_M1_TIMING_RXDELAY_LSB);
+                    log_both("rxdelay %lu: ", (unsigned long)d);
+                    psram_test();
+                }
+            }
+        }
         uint8_t key;
         int down;
         while (usbhid_get_key_action(&key, &down)) {

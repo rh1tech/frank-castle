@@ -5,3 +5,4 @@ release/
 *.bin
 *.cue
 *.mcd
+__pycache__/

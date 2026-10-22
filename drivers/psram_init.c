@@ -48,6 +48,11 @@ void __no_inline_not_in_flash_func(psram_init)(uint cs_pin) {
     if (clock_hz / divisor > 100000000) {
         rxdelay += 1; 
     }
+#ifdef PSRAM_RXDELAY
+    /* measured per board: at 504/3 = 168 MHz an APS6404 here reads
+     * correctly with RXDELAY 5..7 and fails with the derived 4 */
+    rxdelay = PSRAM_RXDELAY;
+#endif
 
     const int clock_period_fs = 1000000000000000ll / clock_hz;
     

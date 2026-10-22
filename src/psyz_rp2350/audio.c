@@ -39,6 +39,7 @@ static volatile uint32_t ring_wr, ring_rd;
 volatile uint32_t audio_underruns;
 volatile uint32_t audio_chunk_max_us; /* worst mixing step (diagnostic) */
 volatile uint32_t audio_peak;         /* loudest sample mixed since the last perf log */
+volatile uint32_t audio_frame_us;     /* mixing time this frame (reset at VSync) */
 static bool audio_running;
 
 /* ---- root counter ticks from core 1, replayed on core 0 ---- */
@@ -107,9 +108,11 @@ bool Audio_FillStep(uint32_t target) {
     if (level >= target) return false;
     uint32_t n = target - level;
     if (n > 256) n = 256;
+    uint32_t t0 = time_us_32();
     Psyz_AudioLock();
     Psyz_SpuPullSamples(buf, (int)n);
     Psyz_AudioUnlock();
+    audio_frame_us += time_us_32() - t0;
     uint32_t wr = ring_wr;
     uint32_t peak = audio_peak;
     for (uint32_t i = 0; i < n; i++) {

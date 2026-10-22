@@ -9,15 +9,16 @@
 # See LICENSE for the full license text.
 #
 # Usage: ./build.sh [M2] [CPU_MHz] [PSRAM_MHz] [FLASH_MHz]
-# Defaults: M2, 504 MHz CPU, 133 MHz PSRAM, 66 MHz flash.
+# Defaults: M2, 504 MHz CPU, 168 MHz PSRAM, 126 MHz flash (read delays tuned
+# per board with the diag firmware; see CMakeLists.txt).
 # USB is always the keyboard host; the debug console is UART0 on GPIO0/1.
 
 set -e
 
 BOARD=${1:-M2}
 CPU=${2:-504}
-PSRAM=${3:-133}
-FLASH=${4:-66}
+PSRAM=${3:-168}
+FLASH=${4:-126}
 
 if [ -z "$PICO_SDK_PATH" ] || [ ! -f "$PICO_SDK_PATH/pico_sdk_init.cmake" ]; then
     export PICO_SDK_PATH="$HOME/pico/pico-sdk"
