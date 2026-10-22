@@ -19,7 +19,8 @@
 #define PSRAM_END       0x11800000
 #define PSRAM_NOCACHE   0x15000000
 
-extern uint8_t __psram_bss_end__[];
+/* Heap starts after every static PSRAM section (data, bss, overlay slots). */
+extern uint8_t __psram_heap_start__[];
 
 // dlmalloc mspace API (from dlmalloc.c compiled with ONLY_MSPACES=1)
 typedef void* mspace;
@@ -58,22 +59,19 @@ static size_t tile_cache_size = 0;
 
 static void psram_heap_auto_init_internal(int verbose) {
     if (!psram_initialized) {
-        uintptr_t bss_end = (uintptr_t)__psram_bss_end__;
+        uintptr_t bss_end = (uintptr_t)__psram_heap_start__;
         bss_end = (bss_end + 0xFFF) & ~0xFFF;
         size_t total_free = PSRAM_END - bss_end;
 
-        // Reserve tile cache at the top of PSRAM
-        tile_cache_size = (total_free > TILE_CACHE_SIZE + 512*1024) ? TILE_CACHE_SIZE : total_free / 3;
-        tile_cache_size &= ~0xFFF;
-        tile_cache_base = (void*)(PSRAM_END - tile_cache_size);
+        // frank-castle: no tile cache, the whole remainder is heap
+        (void)total_free;
+        tile_cache_size = 0;
+        tile_cache_base = (void*)PSRAM_END;
 
         // Give the rest to dlmalloc
         size_t heap_size = (uintptr_t)tile_cache_base - bss_end;
         psram_heap_init_internal((void*)bss_end, heap_size, verbose);
 
-        if (verbose) {
-            printf("PSRAM tile cache: %dKB at 0x%08x\n", (int)(tile_cache_size/1024), (unsigned)(uintptr_t)tile_cache_base);
-        }
     }
 }
 

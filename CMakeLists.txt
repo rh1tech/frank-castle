@@ -117,3 +117,98 @@ pico_set_linker_script(frank-castle-diag ${CMAKE_CURRENT_SOURCE_DIR}/memmap_psra
 pico_enable_stdio_usb(frank-castle-diag 0)
 pico_enable_stdio_uart(frank-castle-diag 1)
 pico_add_extra_outputs(frank-castle-diag)
+
+# ---------------------------------------------------------------------
+# The game: sotn-decomp + psyz, compiled exactly as the PC build does
+# (tools/gen_sources.py keeps cmake/sotn_sources.cmake in sync with it).
+# ---------------------------------------------------------------------
+include(cmake/sotn_sources.cmake)
+list(TRANSFORM SOTN_CORE_SOURCES PREPEND ${SOTN_DIR}/)
+list(TRANSFORM PSYZ_CORE_SOURCES PREPEND ${SOTN_DIR}/)
+
+set(SOTN_DEFINES
+    VERSION_PC PERMUTER NON_MATCHING HARD_LINK _internal_version_us __psyz
+    PLATFORM_RP2350=1
+)
+set(SOTN_INCLUDES
+    ${SOTN_DIR}/include
+    ${SOTN_DIR}/src/dra
+    ${SOTN_DIR}/tools/psyz/psyz/include
+)
+# Same relaxations the upstream PC build uses for PS1-matching code.
+set(SOTN_CFLAGS
+    -funsigned-char -fno-short-enums -std=gnu17 -include stdio.h
+    -Wno-missing-braces -Wno-unused-parameter -Wno-unused-function
+    -Wno-implicit-function-declaration -Wno-incompatible-pointer-types
+    -Wno-int-conversion -Wno-return-mismatch -Wno-return-type
+    -Wno-unused-variable -Wno-unused-but-set-variable -Wno-sign-compare
+    -Wno-pointer-sign -Wno-parentheses -Wno-char-subscripts
+    -Wno-missing-field-initializers -Wno-address-of-packed-member
+)
+
+function(sotn_target_setup target)
+    target_include_directories(${target} PRIVATE ${SOTN_INCLUDES})
+    target_compile_definitions(${target} PRIVATE ${SOTN_DEFINES})
+    target_compile_options(${target} PRIVATE ${SOTN_CFLAGS})
+    # pico_stdlib headers (types, sections) without its sources
+    target_link_libraries(${target} PRIVATE pico_base_headers hardware_sync_headers)
+endfunction()
+
+add_library(sotn_core OBJECT ${SOTN_CORE_SOURCES})
+sotn_target_setup(sotn_core)
+# the decomp's main() becomes sotn_main(), called from src/rp2350/game_main.c
+set_source_files_properties(${SOTN_DIR}/src/pc/main.c TARGET_DIRECTORY sotn_core
+    PROPERTIES COMPILE_DEFINITIONS main=sotn_main)
+
+add_library(psyz_core OBJECT ${PSYZ_CORE_SOURCES}
+    ${SOTN_DIR}/tools/psyz/psyz/src/psyz/libgte_sw_sqrt.c
+    ${SOTN_DIR}/tools/psyz/psyz/src/psyz/psyz_spu.c)
+sotn_target_setup(psyz_core)
+
+add_custom_target(sotn_overlays)
+foreach(ovl ${SOTN_OVERLAYS})
+    set(_srcs ${SOTN_OVL_${ovl}_SOURCES})
+    list(TRANSFORM _srcs PREPEND ${SOTN_DIR}/)
+    add_library(ovl_${ovl} OBJECT ${_srcs} ${SOTN_DIR}/tools/psyz/psyz/src/platform/module_glue.c)
+    sotn_target_setup(ovl_${ovl})
+    target_include_directories(ovl_${ovl} PRIVATE
+        ${SOTN_DIR}/src/pc ${SOTN_DIR}/src/st/${ovl} ${SOTN_DIR}/src/boss/${ovl})
+    target_compile_definitions(ovl_${ovl} PRIVATE OVERLAY_BUILD PSYZ_MODULE_NAME="${ovl}" ${SOTN_OVL_${ovl}_DEFS})
+    add_dependencies(sotn_overlays ovl_${ovl})
+endforeach()
+
+include(cmake/overlays.cmake)
+
+add_executable(frank-castle
+    src/rp2350/game_main.c
+    src/psyz_rp2350/gpu_soft.c
+    src/psyz_rp2350/video.c
+    src/psyz_rp2350/platform.c
+    src/psyz_rp2350/module_static.c
+    ${CMAKE_BINARY_DIR}/castle_modules.c
+    $<TARGET_OBJECTS:sotn_core>
+    $<TARGET_OBJECTS:psyz_core>
+    ${CASTLE_OVL_OBJECTS}
+)
+target_include_directories(frank-castle PRIVATE
+    ${SOTN_INCLUDES}
+    ${SOTN_DIR}/tools/psyz/psyz/src
+    ${SOTN_DIR}/src/pc
+    src/psyz_rp2350
+)
+target_compile_definitions(frank-castle PRIVATE ${SOTN_DEFINES})
+target_compile_options(frank-castle PRIVATE -fno-short-enums -funsigned-char
+    $<$<COMPILE_LANGUAGE:C>:-Wno-incompatible-pointer-types>)
+target_link_libraries(frank-castle castle_platform hardware_dma pico_multicore pico_sync)
+pico_set_linker_script(frank-castle ${CMAKE_CURRENT_SOURCE_DIR}/memmap_castle.ld)
+target_link_options(frank-castle PRIVATE
+    -Wl,-L${CMAKE_BINARY_DIR}
+    -Wl,--no-enum-size-warning
+    -Wl,--wrap=panic
+    -Wl,--print-memory-usage
+)
+set_property(TARGET frank-castle APPEND PROPERTY LINK_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/memmap_castle.ld ${CMAKE_BINARY_DIR}/castle_overlays.ld)
+pico_enable_stdio_usb(frank-castle 0)
+pico_enable_stdio_uart(frank-castle 1)
+pico_add_extra_outputs(frank-castle)
