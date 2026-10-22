@@ -56,6 +56,8 @@ static void core1_main(void) {
     extern void profiler_start(void);
     profiler_start(); /* samples core 1: the IRQ lives on the core that enables it */
 #endif
+    extern void Video_StreamInit(void);
+    Video_StreamInit();
     PsxVideo_Core1Loop();
 }
 

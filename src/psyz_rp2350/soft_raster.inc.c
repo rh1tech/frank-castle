@@ -321,6 +321,37 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
                     nib++;
                 } while (nib < 4 && i <= i1);
             }
+        } else if (!semi) {
+            // 8/15bpp opaque (title and menu backdrops, fades): direct row
+            // reads and per-sprite modulation tables instead of tex_fetch's
+            // switch plus three multiply-clamps per texel. Same output:
+            // the tables hold exactly mod5(c, col) for every 5-bit c.
+            static u16 lut_r[32], lut_g[32], lut_b[32];
+            static int lut_key = -1;
+            int key = v->r | v->g << 8 | v->b << 16;
+            if (key != lut_key) {
+                for (int c = 0; c < 32; c++) {
+                    lut_r[c] = (u16)mod5(c, v->r);
+                    lut_g[c] = (u16)(mod5(c, v->g) << 5);
+                    lut_b[c] = (u16)(mod5(c, v->b) << 10);
+                }
+                lut_key = key;
+            }
+            const u16* trow = t.page + tv * VRAM_W;
+            u16* dst = &row[x0];
+            int u = v->u + i;
+            for (; i <= i1; i++, u++) {
+                u16 texel;
+                if (t.bpp == 1) {
+                    u16 hw = trow[(u & 0xFF) >> 1];
+                    texel = t.clut[(hw >> ((u & 1) * 8)) & 0xFF];
+                } else {
+                    texel = trow[u & 0xFF];
+                }
+                if (!texel) continue;
+                dst[i] = (u16)(lut_r[texel & 0x1F] | lut_g[(texel >> 5) & 0x1F] |
+                               lut_b[(texel >> 10) & 0x1F] | (texel & 0x8000));
+            }
         } else {
             for (; i <= i1; i++) {
                 put_texel(&row[x0 + i], tex_fetch(&t, v->u + i, tv), v->r,

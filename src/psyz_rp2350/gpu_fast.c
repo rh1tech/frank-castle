@@ -80,7 +80,16 @@ volatile int gpu_allocs[8][5], gpu_alloc_n;
 #define CAUSE_EVICT 3
 #define CAUSE_LOAD 4
 
-#define DROW(y) (cur >= 0 ? draw_origin + (y) * draw_sw : g_PsxVram + (y) * VRAM_W)
+/* Long work on core 1 (a full-screen sprite, a 240 KB slot copy) would
+ * starve the scanout ring in the wide modes scanned out of PSRAM: poll it
+ * once per row. Only core 1 rasterizes; the check is two SRAM loads. */
+extern volatile int psxv_beam_row, psxv_fill_row;
+extern void Video_ScanFill(void);
+extern void Video_ScanSync(void);
+static inline void scan_poll(void) {
+    if (psxv_fill_row <= psxv_beam_row + 10 && psxv_fill_row < 240 && get_core_num() == 1) Video_ScanFill();
+}
+#define DROW(y) (scan_poll(), cur >= 0 ? draw_origin + (y) * draw_sw : g_PsxVram + (y) * VRAM_W)
 
 static bool overlaps(const Slot *s, int x, int y, int w, int h) {
     return s->used && x < s->x0 + s->w && x + w > s->x0 && y < s->y0 + s->h && y + h > s->y0;
@@ -113,32 +122,44 @@ static inline void copy_px(u16 *dst, const u16 *src, int n) {
     }
 }
 
+/* what core 1 is doing, for the late-row breakdown in the perf log:
+ * 0 idle, 1 primitive, 2 slot flush, 3 slot load, 4 clear, 5 other VRAM op */
+volatile uint8_t gpu_c1_state;
+
 static void slot_flush_c(Slot *s, int cause) {
     if (!s->used || !s->dirty || !s->loaded) return;
+    uint8_t prev_state = gpu_c1_state;
+    gpu_c1_state = 2;
     gpu_flush_cause[cause]++;
     uint64_t t = time_us_64();
     for (int j = 0; j < s->h; j++) {
         u16 *row = g_PsxVram + (s->y0 + j) * VRAM_W + s->x0;
+        if (get_core_num() == 1) Video_ScanSync();
         row_cache_sync(row, s->w, true);
         copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), s->base + j * s->sw, s->w);
     }
     s->dirty = false;
     gpu_shadow_us += (uint32_t)(time_us_64() - t);
+    gpu_c1_state = prev_state;
 }
 
 #define slot_flush(s) slot_flush_c(s, CAUSE_EVICT)
 
 static void slot_load(Slot *s) {
+    uint8_t prev_state = gpu_c1_state;
+    gpu_c1_state = 3;
     gpu_flush_cause[CAUSE_LOAD]++;
     uint64_t t = time_us_64();
     for (int j = 0; j < s->h; j++) {
         const u16 *row = g_PsxVram + (s->y0 + j) * VRAM_W + s->x0;
+        scan_poll();
         row_cache_sync(row, s->w, false);
         copy_px(s->base + j * s->sw, (const u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), s->w);
     }
     s->loaded = true;
     s->dirty = false;
     gpu_shadow_us += (uint32_t)(time_us_64() - t);
+    gpu_c1_state = prev_state;
 }
 
 static void slot_release(Slot *s) {
@@ -338,6 +359,7 @@ static void load_image_fast(const PS1_RECT *r, const u16 *src) {
 
 static void exec_prim(u_long *packets, int len) {
     uint64_t t = time_us_64();
+    gpu_c1_state = 1;
     int i = slot_for(st.x0, st.y0, st.x1 - st.x0 + 1, st.y1 - st.y0 + 1);
     if (i >= 0) {
         if (!slot[i].loaded) slot_load(&slot[i]);
@@ -352,6 +374,7 @@ static void exec_prim(u_long *packets, int len) {
 #define TIMED(call)                                                   \
     do {                                                              \
         uint64_t t0_ = time_us_64();                                  \
+        gpu_c1_state = 5;                                             \
         call;                                                         \
         gpu_vram_us += (uint32_t)(time_us_64() - t0_);                \
     } while (0)
@@ -370,6 +393,7 @@ static void before_write(const PS1_RECT *r) {
 
 static void exec_clear(PS1_RECT *rect, u_char r, u_char g, u_char b) {
     uint64_t t0 = time_us_64();
+    gpu_c1_state = 4;
     /* clearing a whole framebuffer (a slot's rectangle, or the draw area):
      * fill its slot, no load needed */
     int i = -1;
@@ -450,6 +474,7 @@ bool __not_in_flash_func(Gpu_Core1Work)(uint32_t budget_us) {
         gq_tail = t + 1 + n;
         gq_exec = false;
     } while (gq_head != gq_tail && time_us_32() - t0 < budget_us);
+    gpu_c1_state = 0;
     gpu_busy_us += time_us_32() - t0;
     return true;
 }

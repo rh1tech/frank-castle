@@ -25,13 +25,19 @@ static volatile uint32_t nsamples;
 static volatile bool done, printed;
 static uint64_t start_us;
 
-void __not_in_flash_func(profiler_record)(uint32_t pc) {
+/* return addresses of samples that landed in memcpy (who is copying?) */
+static uint32_t memcpy_lr[256];
+static volatile uint32_t n_memcpy_lr;
+extern char memcpy[];
+
+void __not_in_flash_func(profiler_record)(uint32_t pc, uint32_t lr) {
     timer_hw_t *t = timer1_hw;
     t->intr = 1u << 0;
     t->alarm[0] = t->timerawl + 1000000 / PROFILE_HZ;
     if (done) return;
     if (time_us_64() < start_us) return;
     samples[nsamples++] = pc;
+    if (pc - (uint32_t)(uintptr_t)memcpy < 0xf0 && n_memcpy_lr < 256) memcpy_lr[n_memcpy_lr++] = lr;
     if (nsamples >= PROFILE_SAMPLES) {
         done = true;
         t->inte &= ~1u;
@@ -45,6 +51,7 @@ void __attribute__((naked)) __not_in_flash_func(profiler_isr)(void) {
         "ite eq\n"
         "mrseq r0, msp\n"
         "mrsne r0, psp\n"
+        "ldr r1, [r0, #20]\n"
         "ldr r0, [r0, #24]\n"
         "b profiler_record\n");
 }
@@ -73,5 +80,6 @@ void profiler_poll(void) {
     printed = true;
     printf("[prof] begin %lu\n", (unsigned long)nsamples);
     for (uint32_t i = 0; i < nsamples; i++) printf("[prof] %08lx\n", (unsigned long)samples[i]);
+    for (uint32_t i = 0; i < n_memcpy_lr; i++) printf("[proflr] %08lx\n", (unsigned long)memcpy_lr[i]);
     printf("[prof] end\n");
 }

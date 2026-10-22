@@ -228,6 +228,12 @@ add_executable(frank-castle
     $<TARGET_OBJECTS:psyz_core>
     ${CASTLE_OVL_OBJECTS}
 )
+# Core 1 and IRQ code must stay in SRAM: stop GCC from turning copy loops
+# into calls to newlib's memcpy/memset, which live in flash.
+set_source_files_properties(
+    src/psyz_rp2350/gpu_fast.c src/psyz_rp2350/video.c src/psyz_rp2350/audio.c
+    PROPERTIES COMPILE_OPTIONS "-fno-tree-loop-distribute-patterns")
+
 target_include_directories(frank-castle PRIVATE
     ${SOTN_INCLUDES}
     ${SOTN_DIR}/tools/psyz/psyz/src

@@ -20,6 +20,10 @@
 #include "psx_video.h"
 
 #include "pico/stdlib.h"
+#include "hardware/dma.h"
+#include "hardware/structs/xip_aux.h"
+#include "hardware/structs/xip_ctrl.h"
+#include "hardware/xip_cache.h"
 
 #include <stdio.h>
 #include <stdio.h>
@@ -43,6 +47,11 @@ static volatile bool frame_native;   /* 512/640 modes: one VRAM pixel per output
 static volatile int frame_copy_px;   /* pixels copied from VRAM per row */
 static volatile int frame_src_x;     /* VRAM x of the first copied pixel */
 static volatile int frame_pad;       /* black pixels before the copied ones */
+/* 368/384 modes fill the 640 output columns like a TV does: the row lands at
+ * the tail of its ring slot and is widened in place, nearest neighbour.
+ * Safe in place: output pixel j reads tail pixel xmap[j] >= j. */
+static volatile bool frame_expand;
+static uint16_t xmap[PSXV_OUT_W];
 /* when the frame is held in an SRAM framebuffer slot (gpu_fast.c) */
 static const u16 *volatile frame_sram;
 volatile uint32_t scan_sram, scan_psram; /* latches by source (diagnostic) */
@@ -53,12 +62,15 @@ static volatile int frame_sram_stride, frame_sram_r0, frame_sram_r1;
  * XIP cache, never by DMA: all DMA channels share one bus master, and a PSRAM
  * read stalled behind the game's own traffic would also stall the HSTX
  * channel and break HDMI timing. The HSTX IRQ only touches SRAM. */
-#define NBUF 8
+#define NBUF 16
 static uint16_t line_buf[NBUF][PSXV_OUT_W] __attribute__((aligned(4)));
 static uint16_t black_line[PSXV_OUT_W] __attribute__((aligned(4)));
 static volatile uint32_t vblank_count;
-static volatile int beam_row;   /* source row being shown, -1 in vblank */
-static volatile int fill_row;   /* next source row the loop will copy */
+volatile uint32_t psxv_late_by[8];
+volatile int psxv_beam_row;    /* source row being shown, -1 in vblank */
+volatile int psxv_fill_row;    /* next source row the loop will copy */
+#define beam_row psxv_beam_row
+#define fill_row psxv_fill_row
 static volatile uint32_t frame_seq;
 static volatile bool latch_request; /* display changed by the game */
 volatile uint32_t psxv_late_rows; /* rows not copied in time (diagnostic) */
@@ -126,12 +138,18 @@ static void __not_in_flash_func(latch_frame)(void) {
     frame_x = ox & (VRAM_W - 1);
     frame_y = oy & (VRAM_H - 1);
     frame_w = w;
-    frame_native = w >= 512;
+    frame_expand = w == 368 || w == 384;
+    frame_native = w >= 512 || frame_expand;
     int out = frame_native ? PSXV_OUT_W : PSXV_OUT_W / 2;
     frame_copy_px = w > out ? out : w;
-    frame_src_x = frame_x + (w > out ? (w - out) / 2 : 0); /* 368: show the middle 320 */
+    frame_src_x = frame_x + (w > out ? (w - out) / 2 : 0);
     if (frame_src_x + frame_copy_px > VRAM_W) frame_copy_px = VRAM_W - frame_src_x;
-    frame_pad = (out - frame_copy_px) / 2;
+    frame_pad = frame_expand ? (out - frame_copy_px) & ~1 : (out - frame_copy_px) / 2;
+    static int xmap_w;
+    if (frame_expand && xmap_w != frame_copy_px) {
+        xmap_w = frame_copy_px;
+        for (int j = 0; j < PSXV_OUT_W; j++) xmap[j] = (uint16_t)(frame_pad + j * xmap_w / PSXV_OUT_W);
+    }
     /* ring rows keep black borders: clear them whenever the geometry changes */
     static int last_pad = -1, last_px = -1;
     if (frame_pad != last_pad || frame_copy_px != last_px) {
@@ -180,7 +198,11 @@ static void __not_in_flash_func(on_line)(uint32_t out_line, psxv_line_t *line) {
         line->pixels = sram + row * frame_sram_stride;
         return;
     }
-    if (row >= fill_row) psxv_late_rows++; /* shows whatever the slot held */
+    if (row >= fill_row) { /* shows whatever the slot held */
+        extern volatile uint8_t gpu_c1_state;
+        psxv_late_rows++;
+        psxv_late_by[gpu_c1_state & 7]++;
+    }
     line->pixels = line_buf[row & (NBUF - 1)];
 }
 
@@ -189,10 +211,178 @@ void PsxVideo_Init(void) {
     psxv_set_vsync_callback(on_vsync);
 }
 
+/* The HSTX DMA reads a ring slot up to two output lines after on_line handed
+ * it over, so filling stays NBUF-3 rows ahead at most: never refill a slot
+ * that may still be in flight. */
+#define FILL_AHEAD (NBUF - 3)
+
+/* Rows scanned out of PSRAM are fetched by the XIP stream engine: it reads
+ * in long QSPI bursts into a FIFO that a DREQ-paced DMA channel drains into
+ * the ring. Reading through the cache costs one QSPI transaction per 8-byte
+ * line and kept core 1 busy ~40% of the time in the 512-wide title mode;
+ * the stream leaves core 1 free to rasterize. A DMA reading PSRAM directly
+ * would stall the DMA master (and the HSTX channels) on every access, the
+ * FIFO never does. One row is in flight at a time. */
+static int stream_ch = -1;
+static volatile int stream_row = -1; /* row in flight, -1: idle */
+static uint32_t stream_row_seq;
+volatile uint32_t psxv_stream_rows;
+
+static void stream_start(const uint32_t *src, uint32_t *dst, uint32_t words) {
+    dma_channel_config c = dma_channel_get_default_config(stream_ch);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+    channel_config_set_read_increment(&c, false);
+    channel_config_set_write_increment(&c, true);
+    channel_config_set_dreq(&c, DREQ_XIP_STREAM);
+    dma_channel_configure(stream_ch, &c, dst, &xip_aux_hw->stream, words, false);
+    xip_ctrl_hw->stream_addr = (uint32_t)(uintptr_t)src;
+    xip_ctrl_hw->stream_ctr = words;
+    dma_channel_start(stream_ch);
+}
+
+volatile uint32_t psxv_stream_rescues;
+
+static void stream_abort(void) {
+    dma_channel_abort(stream_ch);
+    xip_ctrl_hw->stream_ctr = 0;
+    /* leftover words would be read first by the next stream */
+    while (!(xip_ctrl_hw->stat & XIP_STAT_FIFO_EMPTY_BITS)) (void)xip_aux_hw->stream;
+}
+
+/* Core 1, before the scanout loop starts: claim a channel and check that
+ * the stream engine really reads the PSRAM window on this board. */
+void Video_StreamInit(void) {
+    static uint32_t probe[64] __attribute__((aligned(4)));
+    uint32_t *ps = (uint32_t *)&vram[511 * VRAM_W]; /* last VRAM row, unused at boot */
+    uint32_t *ps_unc = (uint32_t *)((uintptr_t)ps + (0x15000000u - 0x11000000u));
+    xip_cache_clean_range((uintptr_t)ps - XIP_BASE, sizeof(probe));
+    xip_cache_invalidate_range((uintptr_t)ps - XIP_BASE, sizeof(probe));
+    for (int i = 0; i < 64; i++) ps_unc[i] = 0xA5000000u ^ (uint32_t)i * 0x01010101u;
+    stream_ch = dma_claim_unused_channel(false);
+    if (stream_ch < 0) return;
+    stream_start(ps, probe, 64);
+    absolute_time_t t = make_timeout_time_us(1000);
+    while (dma_channel_is_busy(stream_ch) && !time_reached(t)) tight_loop_contents();
+    bool ok = !dma_channel_is_busy(stream_ch);
+    for (int i = 0; ok && i < 64; i++) ok = probe[i] == (0xA5000000u ^ (uint32_t)i * 0x01010101u);
+    for (int i = 0; i < 64; i++) ps_unc[i] = 0;
+    printf("scanout: XIP stream %s\n", ok ? "ok" : "FAILED, using CPU copies");
+    if (!ok) {
+        dma_channel_abort(stream_ch);
+        xip_ctrl_hw->stream_ctr = 0;
+        dma_channel_unclaim(stream_ch);
+        stream_ch = -1;
+    }
+}
+
+static inline void __attribute__((always_inline)) expand_row(uint16_t *line) {
+    for (int j = 0; j < PSXV_OUT_W; j += 4) {
+        uint16_t a = line[xmap[j]], b = line[xmap[j + 1]], c = line[xmap[j + 2]], d = line[xmap[j + 3]];
+        line[j] = a; line[j + 1] = b; line[j + 2] = c; line[j + 3] = d;
+    }
+}
+
+/* Copy the next scanout row into the ring if the beam needs it. Returns
+ * false when the ring is far enough ahead (or nothing is shown, or the
+ * row in flight has not landed yet). */
+static inline bool __attribute__((always_inline)) fill_one(void) {
+    if (stream_row >= 0) {
+        /* the beam is about to reach the row in flight: wait for it rather
+         * than issue more PSRAM reads that would starve the stream further */
+        while (dma_channel_is_busy(stream_ch)) {
+            if (stream_row_seq != frame_seq) {
+                /* a row of the previous frame: drop it, row 0 is due */
+                stream_abort();
+                stream_row = -1;
+                break;
+            }
+            if (stream_row > beam_row + 3) return false;
+            if (stream_row <= beam_row + 2) {
+                /* starved by other PSRAM traffic and about to be shown: give
+                 * up on the stream and copy the row with the CPU, whose cache
+                 * fills take priority over the stream on the QMI */
+                stream_abort();
+                psxv_stream_rescues++;
+                stream_row = -1;
+                break;
+            }
+        }
+        if (stream_row < 0) goto copy;
+        /* a vblank during the transfer restarted the frame: drop the row */
+        if (stream_row_seq == frame_seq && fill_row == stream_row) {
+            if (frame_expand) expand_row(line_buf[stream_row & (NBUF - 1)]);
+            fill_row = stream_row + 1;
+        }
+        stream_row = -1;
+    }
+copy:;
+    uint32_t seq = frame_seq;
+    int row = fill_row;
+    if (!frame_on || row >= PSXV_OUT_H / 2 || row > beam_row + FILL_AHEAD) return false;
+    bool urgent = row <= beam_row + 2;
+    if (frame_sram && row >= frame_sram_r0 && row < frame_sram_r1) {
+        /* the line callback reads this row straight from SRAM */
+        if (seq == frame_seq) fill_row = row + 1;
+        return true;
+    }
+    int y = (frame_y + row) & (VRAM_H - 1);
+    const uint32_t *src = (const uint32_t *)&vram[y * VRAM_W + frame_src_x];
+    uint16_t *dst16 = &line_buf[row & (NBUF - 1)][frame_pad];
+    int n = frame_copy_px;
+    if (stream_ch >= 0 && !urgent && !(((uintptr_t)src | (uintptr_t)dst16) & 3)) {
+        /* the stream bypasses the cache: commit any pending writes first */
+        xip_cache_clean_range((uintptr_t)src - XIP_BASE, (uint32_t)n * 2);
+        stream_row = row;
+        stream_row_seq = seq;
+        psxv_stream_rows++;
+        stream_start(src, (uint32_t *)dst16, (uint32_t)n / 2);
+        return true;
+    }
+    if (!(((uintptr_t)src | (uintptr_t)dst16) & 3)) {
+        /* 8 words per step: back-to-back PSRAM reads keep the QMI busy */
+        uint32_t *dst = (uint32_t *)dst16;
+        int w = n / 2, i = 0;
+        for (; i + 8 <= w; i += 8) {
+            uint32_t a = src[i], b = src[i + 1], c = src[i + 2], d = src[i + 3];
+            uint32_t e = src[i + 4], f = src[i + 5], g = src[i + 6], h = src[i + 7];
+            dst[i] = a; dst[i + 1] = b; dst[i + 2] = c; dst[i + 3] = d;
+            dst[i + 4] = e; dst[i + 5] = f; dst[i + 6] = g; dst[i + 7] = h;
+        }
+        for (; i < w; i++) dst[i] = src[i];
+    } else {
+        const uint16_t *s16 = (const uint16_t *)src;
+        for (int i = 0; i < n; i++) dst16[i] = s16[i];
+    }
+    if (frame_expand) expand_row(line_buf[row & (NBUF - 1)]);
+    /* a vblank in the middle of the copy restarts the frame */
+    if (seq == frame_seq) fill_row = row + 1;
+    return true;
+}
+
+/* Core 1, from inside long work (big primitives, slot copies): keep the
+ * ring ahead of the beam so wide modes scanned from PSRAM never show stale
+ * rows. Cheap when nothing is due (see Video_ScanPoll in video.h). */
+void __not_in_flash_func(Video_ScanFill)(void) {
+    while (fill_one()) {
+    }
+}
+
+/* Core 1, between rows of a slot flush: the flush's back-to-back PSRAM
+ * writes would starve the stream, so bring the ring fully up to date (and
+ * wait for the row in flight) before every flush row. */
+void __not_in_flash_func(Video_ScanSync)(void) {
+    for (;;) {
+        while (fill_one()) {
+        }
+        if (stream_row < 0) return;
+        if (stream_row_seq != frame_seq || stream_row > beam_row + 6) return;
+        while (dma_channel_is_busy(stream_ch)) tight_loop_contents();
+    }
+}
+
 /* Core 1 thread: keep the ring filled ahead of the beam. The HSTX DMA reads a
  * slot up to two output lines after on_line handed it over, so the loop stays
  * NBUF-3 rows ahead at most: never refill a slot that may still be in flight. */
-#define FILL_AHEAD (NBUF - 3)
 void __not_in_flash_func(PsxVideo_Core1Loop)(void) {
     while (1) {
         if (latch_request && beam_row < 0) {
@@ -205,32 +395,11 @@ void __not_in_flash_func(PsxVideo_Core1Loop)(void) {
             fill_row = 0;
             frame_seq++;
         }
-        uint32_t seq = frame_seq;
-        int row = fill_row;
-        if (!frame_on || row >= PSXV_OUT_H / 2 || row > beam_row + FILL_AHEAD) {
-            /* scanout is ahead (or idle): rasterize, then mix audio */
+        if (!fill_one()) {
+            /* scanout is ahead (or idle): rasterize */
             extern bool Gpu_Core1Work(uint32_t budget_us);
             if (!Gpu_Core1Work(150)) tight_loop_contents();
-            continue;
         }
-        int y = (frame_y + row) & (VRAM_H - 1);
-        if (frame_sram && row >= frame_sram_r0 && row < frame_sram_r1) {
-            /* the line callback reads this row straight from SRAM */
-            if (seq == frame_seq) fill_row = row + 1;
-            continue;
-        }
-        const uint32_t *src = (const uint32_t *)&vram[y * VRAM_W + frame_src_x];
-        uint16_t *dst16 = &line_buf[row & (NBUF - 1)][frame_pad];
-        int n = frame_copy_px;
-        if (!(((uintptr_t)src | (uintptr_t)dst16) & 3)) {
-            uint32_t *dst = (uint32_t *)dst16;
-            for (int i = 0; i < n / 2; i++) dst[i] = src[i];
-        } else {
-            const uint16_t *s16 = (const uint16_t *)src;
-            for (int i = 0; i < n; i++) dst16[i] = s16[i];
-        }
-        /* a vblank in the middle of the copy restarts the frame */
-        if (seq == frame_seq) fill_row = row + 1;
     }
 }
 
@@ -259,7 +428,7 @@ static void frame_stats(uint64_t work_us) {
         extern void profiler_trigger(void);
         static uint32_t prev_prim;
         uint32_t pu = gpu_prim_us;
-        if (pu > prev_prim && pu - prev_prim > 8000 && gpu_prims > 100) profiler_trigger();
+        if (pu > prev_prim && pu - prev_prim > 8000) profiler_trigger();
         prev_prim = pu;
     }
 #endif
@@ -286,6 +455,10 @@ static void frame_stats(uint64_t work_us) {
         printf("[perf] gpu fence wait %lu us/frame, core1: hdmi irq %lu%%, gpu work %lu%%\n",
                (unsigned long)(gpu_fence_us / stat_frames), (unsigned long)(psxv_irq_us / 20000),
                (unsigned long)(gpu_busy_us / 20000));
+        extern volatile uint32_t psxv_stream_rescues;
+        printf("[perf] stream rescues %lu, late rows by core-1 state idle/prim/flush/load/clear/vram: %lu/%lu/%lu/%lu/%lu/%lu\n", (unsigned long)psxv_stream_rescues,
+               (unsigned long)psxv_late_by[0], (unsigned long)psxv_late_by[1], (unsigned long)psxv_late_by[2],
+               (unsigned long)psxv_late_by[3], (unsigned long)psxv_late_by[4], (unsigned long)psxv_late_by[5]);
         extern volatile uint32_t gpu_fence_by[6];
         printf("[perf] fence by sync/display/load/store/reset/other %lu/%lu/%lu/%lu/%lu/%lu us/frame\n",
                (unsigned long)(gpu_fence_by[0] / stat_frames), (unsigned long)(gpu_fence_by[1] / stat_frames),
