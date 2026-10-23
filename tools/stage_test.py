@@ -35,9 +35,12 @@ def main():
     os.write(fd, b"~RST~")
     log = b""
     end = time.time() + 6
-    while time.time() < end:  # spam the args until the firmware echoes them
-        os.write(fd, ("~ARGS --stage %s~" % stage).encode())
-        log += read_for(fd, 0.25)
+    sent = False
+    while time.time() < end:  # send the args once the firmware asks for them
+        log += read_for(fd, 0.05)
+        if b"~ARGS?" in log and not sent:
+            os.write(fd, ("~ARGS --stage %s~" % stage).encode())
+            sent = True
         if b"args from UART" in log:
             break
     log += read_for(fd, 14)  # boot, load

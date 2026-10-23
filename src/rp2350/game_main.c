@@ -112,6 +112,8 @@ static bool uart_args(char *buf, size_t len) {
     static const char tag[] = "~ARGS ";
     size_t pos = 0, n = 0;
     absolute_time_t end = make_timeout_time_ms(1500);
+    /* the RX FIFO holds 32 bytes: senders wait for this before sending */
+    printf("~ARGS?\n");
     while (!time_reached(end)) {
         int ch = getchar_timeout_us(1000);
         if (ch < 0) continue;
@@ -192,5 +194,8 @@ int main(void) {
 
     int r = sotn_main(argc, argv);
     printf("game exited (%d)\n", r);
-    while (1) tight_loop_contents();
+    /* bad ~ARGS~ end up here: keep answering ~BOOT~ / ~RST~ */
+    static char msg[32];
+    snprintf(msg, sizeof(msg), "exit code %d", r);
+    fatal("Game exited", msg);
 }
