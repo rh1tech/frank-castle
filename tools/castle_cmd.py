@@ -96,7 +96,7 @@ class Castle:
             return []
         out = []
         for l in self.since(m):
-            g = re.match(r"~R ROOM (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)", l)
+            g = re.match(r"~R ROOM (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)", l)
             if g:
                 out.append(tuple(int(x) for x in g.groups()))
         return out
@@ -113,7 +113,7 @@ class Castle:
         r = self.cmd("go %s %d" % (stage, room) + ("" if x is None else " %d %d" % (x, y)))
         if not r or not r.startswith("OK"):
             return None
-        end = time.time() + 20
+        end = time.time() + 12
         while time.time() < end:  # reload: wait for the stage, then the room
             self._read(0.3)
             s = self.stat()
@@ -159,7 +159,8 @@ def main():
         print(c.go(a[1], int(a[2]), x, y))
     elif a[0] == "rooms":
         for r in c.rooms():
-            print("room %d: x %d-%d y %d-%d layout %d" % (r[0], r[1], r[3], r[2], r[4], r[5]))
+            print("room %d: x %d-%d y %d-%d layout %d%s" % (r[0], r[1], r[3], r[2], r[4], r[5],
+                  " (loading room)" if r[6] == 255 else ""))
     elif a[0] == "pad":
         c.pad(int(a[1], 16), int(a[2]))
     else:

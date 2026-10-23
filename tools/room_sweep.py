@@ -10,8 +10,10 @@
 # into another room or stage (a transition), and whether the board still
 # answers. A stuck board is rebooted and the sweep goes on.
 #
-# ROOMS: "3", "3-7" or "3,5,9"; default all. Default stages: everything the
-# firmware builds. OUTDIR gets one PNG pair per room, sweep.jsonl (a line
+# ROOMS: "3", "3-7" or "3,5,9"; default all except loading rooms (the
+# doorways to other stages: walking into them from next door tests them).
+# Rooms already done in OUTDIR/sweep.jsonl are skipped, so a sweep can
+# resume. Default stages: everything the firmware builds. OUTDIR gets one PNG pair per room, sweep.jsonl (a line
 # per room) and a contact sheet per stage (needs ImageMagick).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -33,9 +35,10 @@ POKE = [
 ]
 
 
-def parse_rooms(spec, n):
+def parse_rooms(spec, rooms):
+    n = len(rooms)
     if not spec:
-        return list(range(n))
+        return [r[0] for r in rooms if r[6] != 255]
     out = []
     for part in spec.split(","):
         a, _, b = part.partition("-")
@@ -50,6 +53,12 @@ def sweep_room(c, stage, room, outdir):
     st = c.go(stage, room, settle=2.0)
     rec["warp_s"] = round(time.time() - t0, 1)
     if not st:
+        now = c.stat()
+        if now and now.get("state") == 2:
+            # the game sent the player elsewhere (boss/event rooms such as
+            # the first meeting with Maria do this until the event is done)
+            rec["redirected"] = "%s:%s" % (now.get("stage"), now.get("room"))
+            return rec
         rec["error"] = "warp failed"
         return rec
     rec["arrived"] = st
@@ -100,16 +109,25 @@ def main():
     if not c.stat() or c.stat().get("state") != 2:
         c.boot(plan[0][0])
     c.cmd("god 1")
-    log = open(os.path.join(outdir, "sweep.jsonl"), "a")
+    path = os.path.join(outdir, "sweep.jsonl")
+    done = set()
+    if os.path.exists(path):
+        for l in open(path):
+            r = json.loads(l)
+            if "room" in r and "error" not in r:
+                done.add((r["stage"], r["room"]))
+    log = open(path, "a")
     for stage, spec in plan:
         if not c.go(stage, 0, settle=1.0):  # load the stage to read its rooms
             if not (c.boot(stage) and c.cmd("god 1")):
                 print("%s: does not load" % stage, flush=True)
                 log.write(json.dumps({"stage": stage, "error": "stage does not load"}) + "\n")
                 continue
-        rooms = parse_rooms(spec, len(c.rooms()))
+        rooms = parse_rooms(spec, c.rooms())
         recs = []
         for room in rooms:
+            if (stage, room) in done:
+                continue
             rec = sweep_room(c, stage, room, outdir)
             if "error" in rec:  # wedged or lost: reboot into the stage, go on
                 rec["rebooted"] = c.boot(stage) and c.cmd("god 1") is not None
@@ -118,6 +136,7 @@ def main():
             log.flush()
             note = " ".join(x for x in (
                 rec.get("error", ""), "-> " + rec["moved_to"] if "moved_to" in rec else "",
+                "warp redirected to " + rec["redirected"] if "redirected" in rec else "",
                 "%d fps" % rec["fps_min"] if "fps_min" in rec else "",
                 "DIED" if rec.get("died") else "", "; ".join(rec.get("problems", []))) if x)
             print("%s %2d: %s" % (stage, room, note or "ok"), flush=True)
