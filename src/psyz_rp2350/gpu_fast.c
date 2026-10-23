@@ -378,10 +378,23 @@ enum { GQ_PRIM = 1, GQ_TPAGE, GQ_TWIN, GQ_AREA0, GQ_AREA1, GQ_OFFSET, GQ_MASK, G
 #define GQ_LOAD_MAX_WORDS 2048
 static uint32_t load_buf[GQ_LOAD_MAX_WORDS + 2] __attribute__((aligned(4)));
 
+/* timeline diagnostics: when core 0 queues a frame's first and last
+ * command (us after VSync), and how long it waited on a full ring */
+extern volatile uint32_t psxv_vsync_ret_us;
+static uint32_t gq_first_at, gq_last_at;
+volatile uint32_t gq_first_sum, gq_last_sum, gq_full_us;
+
 /* hdr words, then payload words */
 static void gq_push2(uint32_t type, const uint32_t *w, uint32_t n, const uint32_t *p, uint32_t pn) {
     uint32_t total = n + pn;
-    while (GQ_WORDS - (gq_head - gq_tail) < total + 1) tight_loop_contents(); /* ring full */
+    uint32_t now = time_us_32() - psxv_vsync_ret_us;
+    if (!gq_first_at) gq_first_at = now ? now : 1;
+    if (GQ_WORDS - (gq_head - gq_tail) < total + 1) {
+        uint32_t t0 = time_us_32();
+        while (GQ_WORDS - (gq_head - gq_tail) < total + 1) tight_loop_contents(); /* ring full */
+        gq_full_us += time_us_32() - t0;
+    }
+    gq_last_at = time_us_32() - psxv_vsync_ret_us;
     uint32_t h = gq_head;
     gq[h & (GQ_WORDS - 1)] = type << 24 | total;
     for (uint32_t i = 0; i < n; i++) gq[(h + 1 + i) & (GQ_WORDS - 1)] = w[i];
@@ -827,6 +840,9 @@ int Draw_ExequeSync(void) {
     if (!in_drawsync) return 0;
     gpu_sync_at_us += time_us_32() - psxv_vsync_ret_us;
     gpu_tl_frames++;
+    gq_first_sum += gq_first_at;
+    gq_last_sum += gq_last_at;
+    gq_first_at = 0;
     /* useful work while core 1 finishes the frame: mix the audio now
      * instead of after VSync */
     extern bool Audio_IdleFill(void);

@@ -522,6 +522,12 @@ static void frame_stats(uint64_t work_us) {
                    (unsigned long)(gpu_sync_at_us / gpu_tl_frames), (unsigned long)(gpu_drain_at_us / gpu_tl_frames),
                    (unsigned long)(vsync_entry_at_us / (vsync_calls ? vsync_calls : 1)), (unsigned long)vsync_late,
                    (unsigned long)vsync_calls, (unsigned long)gpu_tl_frames);
+        extern volatile uint32_t gq_first_sum, gq_last_sum, gq_full_us;
+        if (gpu_tl_frames)
+            PV("[perf] queue: first command at %lu us, last at %lu us, ring full %lu us/frame\n",
+               (unsigned long)(gq_first_sum / gpu_tl_frames), (unsigned long)(gq_last_sum / gpu_tl_frames),
+               (unsigned long)(gq_full_us / gpu_tl_frames));
+        gq_first_sum = gq_last_sum = gq_full_us = 0;
         for (uint32_t k = 0; k < vsync_late && k < 8; k++)
             PV("[perf] late frame: VSync at %lu, DrawSync done %lu, core 1 drained %lu us, mixing %lu us, %lu SD sectors, raster %lu us, core-1 flush %lu us (%lu rows), vram ops %lu us, slot copies %lu us, slowest op kind %lu %lux%lu %lu us\n",
                    (unsigned long)late_log[k][0], (unsigned long)late_log[k][1], (unsigned long)late_log[k][2],

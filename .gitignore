@@ -6,3 +6,4 @@ release/
 *.cue
 *.mcd
 __pycache__/
+build-*/
