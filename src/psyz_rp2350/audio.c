@@ -98,16 +98,16 @@ void Audio_Init(void) {
 #define AUDIO_HIGH 3584 /* ~81 ms: DrawSync fills up to here while waiting */
 #define AUDIO_LOW 1536  /* ~35 ms: below this VSync tops up */
 
-/* Mix up to 256 frames if the ring holds fewer than target. Returns true if
- * it mixed. */
-bool Audio_FillStep(uint32_t target) {
+/* Mix up to maxn (<= 256) frames if the ring holds fewer than target.
+ * Returns true if it mixed. */
+static bool fill_step_n(uint32_t target, uint32_t maxn) {
     static short buf[256 * 2];
     extern volatile bool psyz_audio_ready;
     if (!psyz_audio_ready) return false;
     uint32_t level = ring_wr - ring_rd;
     if (level >= target) return false;
     uint32_t n = target - level;
-    if (n > 256) n = 256;
+    if (n > maxn) n = maxn;
     uint32_t t0 = time_us_32();
     Psyz_AudioLock();
     Psyz_SpuPullSamples(buf, (int)n);
@@ -128,6 +128,8 @@ bool Audio_FillStep(uint32_t target) {
     return true;
 }
 
+bool Audio_FillStep(uint32_t target) { return fill_step_n(target, 256); }
+
 uint32_t Audio_Level(void) { return ring_wr - ring_rd; }
 
 /* VSync: emergency top-up only (the DrawSync wait normally keeps it full). */
@@ -141,6 +143,14 @@ void Audio_FrameFill(void) {
 
 /* DrawSync, while core 1 is still busy: one step towards AUDIO_HIGH. */
 bool Audio_IdleFill(void) { return Audio_FillStep(AUDIO_HIGH); }
+
+/* DrawSync, before core 0 helps rasterize: about a frame of audio over the
+ * VSync threshold, so the frame never needs VSync's emergency top-up. */
+bool Audio_PreHelpFill(void) { return Audio_FillStep(AUDIO_LOW + 1024); }
+
+/* While helping, when core 0 has nothing to draw: a short step (~0.25 ms)
+ * towards AUDIO_HIGH, so it is back for the next command soon. */
+bool Audio_HelpIdleFill(void) { return fill_step_n(AUDIO_HIGH, 64); }
 
 /* Mix one chunk if the ring has room. Returns true if it did work. */
 bool __not_in_flash_func(Audio_Core1Poll)(void) {

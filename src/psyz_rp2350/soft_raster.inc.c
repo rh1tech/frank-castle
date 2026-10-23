@@ -17,6 +17,24 @@
 // ---- shared-macro shims -----------------------------------------------------
 // When the PC shell includes sdl3_common.h first it already provides these;
 // the ESP32 build defines SOFT_RASTER_STANDALONE and gets them here.
+// frank-castle: with SOFT_PER_CORE defined (an expression giving the
+// current core, 0 or 1) two cores can rasterize at once, each with its own
+// draw state. Core 1 is the main rasterizer and keeps the SRAM caches; the
+// other core reads CLUTs from VRAM and skips the palette and row-fetch
+// fast paths, which need per-core buffers there is no SRAM for.
+#ifdef SOFT_PER_CORE
+#define SOFT_NCORE 2
+#define SOFT_CORE_ID() (SOFT_PER_CORE)
+#else
+#define SOFT_NCORE 1
+#define SOFT_CORE_ID() 0
+#endif
+#define SOFT_MAIN_CORE() (SOFT_CORE_ID() == SOFT_NCORE - 1)
+// where the shell wants the rasterizer's larger scratch buffers
+#ifndef SOFT_SCRATCH
+#define SOFT_SCRATCH
+#endif
+
 #ifdef SOFT_RASTER_STANDALONE
 #include <stdbool.h>
 // PS1_RECT is sdl3_common's rename of libgpu's RECT (dodging windef's on
@@ -27,7 +45,8 @@
 #define EXTRA_VERTEX 0x08
 #define GOURAUD 0x10
 #define TRIANGLE 0x20
-static unsigned short cur_tpage = 0;
+static unsigned short soft_cur_tpage[SOFT_NCORE];
+#define cur_tpage (soft_cur_tpage[SOFT_CORE_ID()])
 static short s11(short v) { return (short)(((v & 0x7FF) ^ 1024) - 1024); }
 #ifndef WARNF
 #define WARNF(...)
@@ -80,7 +99,8 @@ typedef struct {
     int x0, y0, x1, y1; // draw area, inclusive
     int ox, oy;         // draw offset
 } SoftState;
-static SoftState st = {0, 0, VRAM_W - 1, VRAM_H - 1, 0, 0};
+static SoftState soft_st[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = {0, 0, VRAM_W - 1, VRAM_H - 1, 0, 0}};
+#define st (soft_st[SOFT_CORE_ID()])
 
 // One vertex after packet parsing. Colors stay 8-bit until the pixel write.
 typedef struct {
@@ -111,6 +131,9 @@ static void clut_cache_flush(void) {
     }
 }
 static inline const u16* clut_cached(u16 id, const u16* src, int n) {
+    if (!SOFT_MAIN_CORE()) {
+        return src;
+    }
     for (int i = 0; i < SOFT_CLUT_WAYS; i++) {
         if (clut_cache_key[i] == id) {
             return clut_cache[i];
@@ -204,7 +227,8 @@ typedef struct {
     int abr;          // semi-transparency mode from the tpage
 } Tex;
 
-static unsigned soft_px; // pixels spanned (perf counters)
+static unsigned soft_px_c[SOFT_NCORE]; // pixels spanned (perf counters)
+#define soft_px (soft_px_c[SOFT_CORE_ID()])
 int soft_semi_log[6][5], soft_semi_logged; // big semi-transparent sprites (diagnostic)
 
 static inline Tex tex_from(u16 tpage, u16 clut) {
@@ -582,8 +606,11 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
     // the general path's.
     bool tile = t.bpp == 0 && !semi && v->r == 0x80 && v->g == 0x80 && v->b == 0x80 &&
                 ((v->u + i0) & 3) == 0 && ((i1 - i0) & 3) == 3;
-    static u16 lr[32], lg[32], lb[32];
-    static int lkey = -1;
+    static u16 lr_c[SOFT_NCORE][32], lg_c[SOFT_NCORE][32], lb_c[SOFT_NCORE][32];
+    static int lkey_c[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = -1};
+    u16 *lr = lr_c[SOFT_CORE_ID()], *lg = lg_c[SOFT_CORE_ID()], *lb = lb_c[SOFT_CORE_ID()];
+    int* plkey = &lkey_c[SOFT_CORE_ID()];
+#define lkey (*plkey)
     if (!tile) {
         int key = v->r | v->g << 8 | v->b << 16;
         if (key != lkey) {
@@ -597,12 +624,13 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
     }
     SpanCtx sc = {t.page, t.clut, 0, 0, 0, 0, 0, semi, t.abr, lr, lg, lb,
                   v->r == 0x80 && v->g == 0x80 && v->b == 0x80, 0};
-    if (!tile && !sc.neutral && t.bpp <= 1 && (i1 - i0 + 1) * (j1 - j0 + 1) >= 512) {
+#undef lkey
+    if (SOFT_MAIN_CORE() && !tile && !sc.neutral && t.bpp <= 1 && (i1 - i0 + 1) * (j1 - j0 + 1) >= 512) {
         // Coloured palettised sprite (title/menu backdrops): modulate the
         // palette once instead of every texel. Bit 16 marks entries that are
         // drawn: transparency is decided by the raw texel, and a dark texel
         // may modulate to exactly 0.
-        static uint32_t mclut[256];
+        static uint32_t mclut[256] SOFT_SCRATCH;
         int ncol = t.bpp == 0 ? 16 : 256;
         for (int k = 0; k < ncol; k++) {
             u16 tx = t.clut[k];
@@ -618,7 +646,7 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
     // or eight texels. Rows that wrap around the texture page take the
     // normal path.
     if (!tile && (t.bpp == 1 || t.bpp == 2) && v->u + i1 <= 255 && i1 - i0 >= 31) {
-        static u16 rbuf[2][260] __attribute__((aligned(4)));
+        static u16 rbuf[2][260] __attribute__((aligned(4))) SOFT_SCRATCH;
         int u0 = v->u + i0, u1 = v->u + i1, uoff, words;
         if (t.bpp == 2) {
             uoff = u0 & ~1;
@@ -733,7 +761,8 @@ SOFT_RASTER_IRAM static void raster_tile(const SV* v, int w, int h, int semi, in
 
 // Triangle with gouraud + affine UV, integer edge functions, top-left rule.
 // 2D game, orthographic: affine interpolation is exact.
-static unsigned tri_c_setup_end; // cycle stamp when span drawing starts (diagnostic)
+static unsigned tri_c_setup_end_c[SOFT_NCORE]; // cycle stamp when span drawing starts (diagnostic)
+#define tri_c_setup_end (tri_c_setup_end_c[SOFT_CORE_ID()])
 unsigned soft_tri_setup_cyc, soft_tri_span_cyc, soft_tri_n;
 #define CYC() (*(volatile unsigned*)0xE0001004)
 SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV* c, int textured,
@@ -975,8 +1004,11 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
     // is identical; modulation comes from per-primitive tables holding
     // exactly mod5(c, col).
     if (textured && !gouraud) {
-        static u16 lr[32], lg[32], lb[32];
-        static int lkey = -1;
+        static u16 lr_c[SOFT_NCORE][32], lg_c[SOFT_NCORE][32], lb_c[SOFT_NCORE][32];
+        static int lkey_c[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = -1};
+        u16 *lr = lr_c[SOFT_CORE_ID()], *lg = lg_c[SOFT_CORE_ID()], *lb = lb_c[SOFT_CORE_ID()];
+        int* plkey = &lkey_c[SOFT_CORE_ID()];
+#define lkey (*plkey)
         int key = a->r | a->g << 8 | a->b << 16;
         if (key != lkey) {
             for (int c = 0; c < 32; c++) {
@@ -986,6 +1018,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
             }
             lkey = key;
         }
+#undef lkey
         SpanCtx sc = {t.page, t.clut, udx, vdx, 0, 0, 0, semi, t.abr, lr, lg, lb,
                       a->r == 0x80 && a->g == 0x80 && a->b == 0x80, 0};
         for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
