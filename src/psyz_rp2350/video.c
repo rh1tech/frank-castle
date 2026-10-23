@@ -516,6 +516,30 @@ static void frame_stats(uint64_t work_us) {
         PV("[perf] gpu fence wait %lu us/frame, core1: hdmi irq %lu%%, gpu work %lu%%\n",
                (unsigned long)(gpu_fence_us / stat_frames), (unsigned long)(psxv_irq_us / 20000),
                (unsigned long)(gpu_busy_us / 20000));
+        {
+            extern volatile uint32_t help_cmds, help_frames, help_wait_sync_us, help_wait_full_us,
+                help_draw_us, help_start_us, help_idle_us, help_split;
+            uint32_t hf = help_frames ? help_frames : 1;
+            PV("[perf] help: %lu frames, %lu prims/frame, core 0 draws %lu us/frame from %lu us; "
+               "core 1 waits for it %lu us (sync) %lu us (ring full), core 0 idle %lu us per frame; split %lu/64\n",
+               (unsigned long)help_frames, (unsigned long)(help_cmds / hf), (unsigned long)(help_draw_us / hf),
+               (unsigned long)(help_start_us / hf), (unsigned long)(help_wait_sync_us / hf),
+               (unsigned long)(help_wait_full_us / hf), (unsigned long)(help_idle_us / hf),
+               (unsigned long)help_split);
+            help_idle_us = 0;
+            extern volatile uint32_t help_sync_n[6], help_sync_us[6], help_upload_free;
+            PV("[perf] help: %lu uploads/frame skipped the wait\n", (unsigned long)(help_upload_free / hf));
+            help_upload_free = 0;
+            PV("[perf] help syncs n/us per frame: flush %lu/%lu load %lu/%lu alloc %lu/%lu clear %lu/%lu move %lu/%lu upload %lu/%lu\n",
+               (unsigned long)(help_sync_n[0] / hf), (unsigned long)(help_sync_us[0] / hf),
+               (unsigned long)(help_sync_n[1] / hf), (unsigned long)(help_sync_us[1] / hf),
+               (unsigned long)(help_sync_n[2] / hf), (unsigned long)(help_sync_us[2] / hf),
+               (unsigned long)(help_sync_n[3] / hf), (unsigned long)(help_sync_us[3] / hf),
+               (unsigned long)(help_sync_n[4] / hf), (unsigned long)(help_sync_us[4] / hf),
+               (unsigned long)(help_sync_n[5] / hf), (unsigned long)(help_sync_us[5] / hf));
+            for (int k = 0; k < 6; k++) help_sync_n[k] = help_sync_us[k] = 0;
+            help_cmds = help_frames = help_wait_sync_us = help_wait_full_us = help_draw_us = help_start_us = 0;
+        }
         extern volatile uint32_t gpu_sync_at_us, gpu_drain_at_us, gpu_tl_frames;
         if (gpu_tl_frames)
             PV("[perf] timeline from VSync: DrawSync at %lu us, core 1 drained at %lu us, VSync entered at %lu us (avg), %lu late, %lu VSync / %lu DrawSync\n",

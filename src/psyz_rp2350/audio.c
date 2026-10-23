@@ -109,9 +109,15 @@ static bool fill_step_n(uint32_t target, uint32_t maxn) {
     uint32_t n = target - level;
     if (n > maxn) n = maxn;
     uint32_t t0 = time_us_32();
+    /* the lock also covers the ring write: core 1 mixes too (Audio_Core1Poll) */
     Psyz_AudioLock();
+    level = ring_wr - ring_rd;
+    if (level >= target) {
+        Psyz_AudioUnlock();
+        return false;
+    }
+    if (n > target - level) n = target - level;
     Psyz_SpuPullSamples(buf, (int)n);
-    Psyz_AudioUnlock();
     audio_frame_us += time_us_32() - t0;
     uint32_t wr = ring_wr;
     uint32_t peak = audio_peak;
@@ -124,6 +130,7 @@ static bool fill_step_n(uint32_t target, uint32_t maxn) {
     audio_peak = peak;
     __dmb();
     ring_wr = wr + n;
+    Psyz_AudioUnlock();
     audio_running = true;
     return true;
 }
@@ -160,8 +167,11 @@ bool __not_in_flash_func(Audio_Core1Poll)(void) {
     if (!psyz_audio_ready || RING_FRAMES - (ring_wr - ring_rd) < CHUNK) return false;
     if (!Psyz_AudioTryLock()) return false; /* game thread is in the SPU */
     uint32_t t0 = time_us_32();
+    if (RING_FRAMES - (ring_wr - ring_rd) < CHUNK) { /* core 0 filled it meanwhile */
+        Psyz_AudioUnlock();
+        return false;
+    }
     Psyz_SpuPullSamples(tmp, CHUNK);
-    Psyz_AudioUnlock();
     uint32_t dt = time_us_32() - t0;
     if (dt > audio_chunk_max_us) audio_chunk_max_us = dt;
     uint32_t wr = ring_wr;
@@ -169,6 +179,7 @@ bool __not_in_flash_func(Audio_Core1Poll)(void) {
         ring[(wr + i) & (RING_FRAMES - 1)] = (uint16_t)tmp[2 * i] | ((uint32_t)(uint16_t)tmp[2 * i + 1] << 16);
     __dmb(); /* frames visible to the I2S IRQ on core 0 before the index */
     ring_wr = wr + CHUNK;
+    Psyz_AudioUnlock();
     audio_running = true;
     return true;
 }

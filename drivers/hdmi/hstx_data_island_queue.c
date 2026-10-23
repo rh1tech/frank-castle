@@ -4,7 +4,9 @@
 
 #include "pico.h"
 
-#define DI_RING_BUFFER_SIZE 256
+/* frank-castle: audio goes out over I2S and nothing is ever queued here,
+ * only the silent packet is sent, so the ring is kept minimal (was 256) */
+#define DI_RING_BUFFER_SIZE 4
 static hstx_data_island_t di_ring_buffer[DI_RING_BUFFER_SIZE];
 static volatile uint32_t di_ring_head = 0;
 static volatile uint32_t di_ring_tail = 0;

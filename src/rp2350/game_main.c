@@ -159,7 +159,11 @@ int main(void) {
     psxv_init();
     InitPlatform();
     multicore_reset_core1();
-    multicore_launch_core1(core1_main);
+    /* core 1's default stack is 2 KB at the top of SCRATCH_X, right above
+     * the scanout code there; it mixes the SPU from inside the GPU worker
+     * (while it waits for core 0), which needs more */
+    static uint32_t core1_stack[6 * 1024 / 4];
+    multicore_launch_core1_with_stack(core1_main, core1_stack, sizeof(core1_stack));
 
     platform_init_usb();
     Audio_Init(); /* I2S IRQ on core 0; the SPU mixer runs on core 1 */
