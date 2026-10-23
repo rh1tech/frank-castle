@@ -268,6 +268,15 @@ set(SOTN_OVERLAYS
     rbo3
     rbo4
     rbo7
+    nz1
+    top
+    rcat
+    rlib
+    rno1
+    rno2
+    rnz0
+    rnz1
+    rtop
     tt_000
     tt_001
     tt_002
@@ -1590,6 +1599,458 @@ set(SOTN_OVL_rbo7_SOURCES
     src/boss/rbo7/bss.c
 )
 set(SOTN_OVL_rbo7_DEFS
+)
+
+set(SOTN_OVL_nz1_SOURCES
+    src/pc/stages/stage_nz1.c
+    src/st/nz1/background_block_init.c
+    src/st/nz1/bossfight.c
+    src/st/nz1/collision.c
+    src/st/nz1/create_entity.c
+    src/st/nz1/d_prize_drops.c
+    src/st/nz1/d_water_data.c
+    src/st/nz1/e_bg_gears.c
+    src/st/nz1/e_breakable.c
+    src/st/nz1/e_breakable_bridge.c
+    src/st/nz1/e_cloaked_knight.c
+    src/st/nz1/e_clouds.c
+    src/st/nz1/e_collect.c
+    src/st/nz1/e_explosion_puff_opaque.c
+    src/st/nz1/e_flail_guard.c
+    src/st/nz1/e_flea_armor.c
+    src/st/nz1/e_flea_man.c
+    src/st/nz1/e_gear_horizontal.c
+    src/st/nz1/e_gear_large.c
+    src/st/nz1/e_gear_puzzle.c
+    src/st/nz1/e_gear_small.c
+    src/st/nz1/e_gear_vertical.c
+    src/st/nz1/e_harpy.c
+    src/st/nz1/e_init.c
+    src/st/nz1/e_karasuman.c
+    src/st/nz1/e_life_up.c
+    src/st/nz1/e_lock_camera.c
+    src/st/nz1/e_medusa_head.c
+    src/st/nz1/e_misc.c
+    src/st/nz1/e_particles.c
+    src/st/nz1/e_pendulum.c
+    src/st/nz1/e_phantom_skull.c
+    src/st/nz1/e_red_door.c
+    src/st/nz1/e_red_door_tiles.c
+    src/st/nz1/e_room_bg.c
+    src/st/nz1/e_room_fg.c
+    src/st/nz1/e_secrets.c
+    src/st/nz1/e_skull_lord.c
+    src/st/nz1/e_spikes.c
+    src/st/nz1/e_stage_name.c
+    src/st/nz1/e_sword_lord.c
+    src/st/nz1/e_vandal_sword.c
+    src/st/nz1/e_water_fg.c
+    src/st/nz1/graphics_banks.c
+    src/st/nz1/header.c
+    src/st/nz1/layers.c
+    src/st/nz1/palette_def.c
+    src/st/nz1/popup.c
+    src/st/nz1/prim_helpers.c
+    src/st/nz1/sprite_banks.c
+    src/st/nz1/st_common.c
+    src/st/nz1/st_update.c
+    src/st/nz1/stage_data.c
+    src/st/nz1/tilemaps.c
+    src/st/nz1/water_effects.c
+    src/st/nz1/gen/e_laydef.c
+    src/st/nz1/gen/e_layout.c
+    src/st/nz1/gen/rooms.c
+    src/st/nz1/gen/sprites.c
+)
+set(SOTN_OVL_nz1_DEFS
+)
+
+set(SOTN_OVL_top_SOURCES
+    src/pc/stages/stage_top.c
+    src/st/top/collision.c
+    src/st/top/create_entity.c
+    src/st/top/cutscene.c
+    src/st/top/cutscene_data.c
+    src/st/top/d_prize_drops.c
+    src/st/top/e_blue_axe_knight.c
+    src/st/top/e_breakable.c
+    src/st/top/e_breakable_wall.c
+    src/st/top/e_clock_tower.c
+    src/st/top/e_clouds.c
+    src/st/top/e_collect.c
+    src/st/top/e_elevator.c
+    src/st/top/e_flea_rider.c
+    src/st/top/e_init.c
+    src/st/top/e_lion_lamp.c
+    src/st/top/e_lock_camera.c
+    src/st/top/e_misc.c
+    src/st/top/e_particles.c
+    src/st/top/e_red_door.c
+    src/st/top/e_red_door_tiles.c
+    src/st/top/e_richter_fight_trigger.c
+    src/st/top/e_room_bg.c
+    src/st/top/e_room_fg.c
+    src/st/top/e_secret_stairs.c
+    src/st/top/e_stage_name.c
+    src/st/top/e_warp_trigger.c
+    src/st/top/graphics_banks.c
+    src/st/top/header.c
+    src/st/top/layers.c
+    src/st/top/palette_def.c
+    src/st/top/popup.c
+    src/st/top/post_richter_cutscene.c
+    src/st/top/prim_helpers.c
+    src/st/top/sprite_banks.c
+    src/st/top/st_common.c
+    src/st/top/st_update.c
+    src/st/top/stage_data.c
+    src/st/top/tilemaps.c
+    src/st/top/gen/e_laydef.c
+    src/st/top/gen/e_layout.c
+    src/st/top/gen/rooms.c
+    src/st/top/gen/sprites.c
+)
+set(SOTN_OVL_top_DEFS
+)
+
+set(SOTN_OVL_rcat_SOURCES
+    src/pc/stages/stage_rcat.c
+    src/st/rcat/background_block_init.c
+    src/st/rcat/collision.c
+    src/st/rcat/create_entity.c
+    src/st/rcat/d_prize_drops.c
+    src/st/rcat/e_bat.c
+    src/st/rcat/e_blood_skeleton.c
+    src/st/rcat/e_breakable.c
+    src/st/rcat/e_cavern_background.c
+    src/st/rcat/e_collect.c
+    src/st/rcat/e_frozen_half.c
+    src/st/rcat/e_init.c
+    src/st/rcat/e_lava.c
+    src/st/rcat/e_lock_camera.c
+    src/st/rcat/e_misc.c
+    src/st/rcat/e_particles.c
+    src/st/rcat/e_red_door.c
+    src/st/rcat/e_red_door_tiles.c
+    src/st/rcat/e_room_bg.c
+    src/st/rcat/e_room_fg.c
+    src/st/rcat/e_salome.c
+    src/st/rcat/e_secrets.c
+    src/st/rcat/e_skeleton.c
+    src/st/rcat/e_spikes.c
+    src/st/rcat/e_stage_name.c
+    src/st/rcat/gfx_data.c
+    src/st/rcat/graphics_banks.c
+    src/st/rcat/header.c
+    src/st/rcat/layers.c
+    src/st/rcat/palette_def.c
+    src/st/rcat/palettes_pc.c
+    src/st/rcat/popup.c
+    src/st/rcat/prim_helpers.c
+    src/st/rcat/sprite_banks.c
+    src/st/rcat/st_common.c
+    src/st/rcat/st_update.c
+    src/st/rcat/tilemaps.c
+    src/st/rcat/unk_31F1C.c
+    src/st/rcat/unk_32118.c
+    src/st/rcat/unk_323D8.c
+    src/st/rcat/gen/e_laydef.c
+    src/st/rcat/gen/e_layout.c
+    src/st/rcat/gen/rooms.c
+    src/st/rcat/gen/us/sprites.c
+)
+set(SOTN_OVL_rcat_DEFS
+)
+
+set(SOTN_OVL_rlib_SOURCES
+    src/pc/stages/stage_rlib.c
+    src/st/rlib/collision.c
+    src/st/rlib/create_entity.c
+    src/st/rlib/d_prize_drops.c
+    src/st/rlib/e_breakable.c
+    src/st/rlib/e_candle_table.c
+    src/st/rlib/e_collect.c
+    src/st/rlib/e_explosion_puff_opaque.c
+    src/st/rlib/e_init.c
+    src/st/rlib/e_library_bg.c
+    src/st/rlib/e_lion.c
+    src/st/rlib/e_lock_camera.c
+    src/st/rlib/e_misc.c
+    src/st/rlib/e_particles.c
+    src/st/rlib/e_red_door.c
+    src/st/rlib/e_red_door_tiles.c
+    src/st/rlib/e_room_bg.c
+    src/st/rlib/e_room_fg.c
+    src/st/rlib/e_scarecrow_schmoo.c
+    src/st/rlib/e_stage_name.c
+    src/st/rlib/e_thick_bookcase.c
+    src/st/rlib/e_tinman.c
+    src/st/rlib/graphics_banks.c
+    src/st/rlib/header.c
+    src/st/rlib/layers.c
+    src/st/rlib/palette_def.c
+    src/st/rlib/popup.c
+    src/st/rlib/prim_helpers.c
+    src/st/rlib/sprite_banks.c
+    src/st/rlib/st_common.c
+    src/st/rlib/st_update.c
+    src/st/rlib/stage_data.c
+    src/st/rlib/tilemaps.c
+    src/st/rlib/gen/e_laydef.c
+    src/st/rlib/gen/e_layout.c
+    src/st/rlib/gen/rooms.c
+    src/st/rlib/gen/us/sprites.c
+)
+set(SOTN_OVL_rlib_DEFS
+)
+
+set(SOTN_OVL_rno1_SOURCES
+    src/pc/stages/stage_rno1.c
+    src/st/rno1/collision.c
+    src/st/rno1/create_entity.c
+    src/st/rno1/d_prize_drops.c
+    src/st/rno1/e_boss_ante_decor.c
+    src/st/rno1/e_boss_round_door.c
+    src/st/rno1/e_breakable.c
+    src/st/rno1/e_collect.c
+    src/st/rno1/e_doorway_blocker.c
+    src/st/rno1/e_elevator_machine.c
+    src/st/rno1/e_init.c
+    src/st/rno1/e_jack_o_bones.c
+    src/st/rno1/e_lock_camera.c
+    src/st/rno1/e_misc.c
+    src/st/rno1/e_nova_skeleton.c
+    src/st/rno1/e_paranthropus.c
+    src/st/rno1/e_particles.c
+    src/st/rno1/e_red_door.c
+    src/st/rno1/e_red_door_tiles.c
+    src/st/rno1/e_room_bg.c
+    src/st/rno1/e_room_fg.c
+    src/st/rno1/e_secrets.c
+    src/st/rno1/e_stage_name.c
+    src/st/rno1/e_stone_skull.c
+    src/st/rno1/e_weather.c
+    src/st/rno1/graphics_banks.c
+    src/st/rno1/header.c
+    src/st/rno1/layers.c
+    src/st/rno1/palette_def.c
+    src/st/rno1/popup.c
+    src/st/rno1/prim_helpers.c
+    src/st/rno1/sprite_banks.c
+    src/st/rno1/st_common.c
+    src/st/rno1/st_update.c
+    src/st/rno1/stage_data.c
+    src/st/rno1/tilemaps.c
+    src/st/rno1/gen/e_laydef.c
+    src/st/rno1/gen/e_layout.c
+    src/st/rno1/gen/rooms.c
+    src/st/rno1/gen/us/sprites.c
+)
+set(SOTN_OVL_rno1_DEFS
+)
+
+set(SOTN_OVL_rno2_SOURCES
+    src/pc/stages/stage_rno2.c
+    src/st/rno2/collision.c
+    src/st/rno2/create_entity.c
+    src/st/rno2/d_prize_drops.c
+    src/st/rno2/e_azaghal.c
+    src/st/rno2/e_background_house.c
+    src/st/rno2/e_bloody_zombie.c
+    src/st/rno2/e_breakable.c
+    src/st/rno2/e_collect.c
+    src/st/rno2/e_ctulhu.c
+    src/st/rno2/e_flying_zombie.c
+    src/st/rno2/e_ghost_dancer.c
+    src/st/rno2/e_house_shader.c
+    src/st/rno2/e_init.c
+    src/st/rno2/e_karasuman.c
+    src/st/rno2/e_lock_camera.c
+    src/st/rno2/e_malachi.c
+    src/st/rno2/e_medusa_head.c
+    src/st/rno2/e_misc.c
+    src/st/rno2/e_particles.c
+    src/st/rno2/e_prisoner.c
+    src/st/rno2/e_red_door.c
+    src/st/rno2/e_red_door_tiles.c
+    src/st/rno2/e_room_bg.c
+    src/st/rno2/e_room_decor.c
+    src/st/rno2/e_room_fg.c
+    src/st/rno2/e_sealed_door.c
+    src/st/rno2/e_secrets.c
+    src/st/rno2/e_spikes.c
+    src/st/rno2/e_stage_name.c
+    src/st/rno2/graphics_banks.c
+    src/st/rno2/header.c
+    src/st/rno2/layers.c
+    src/st/rno2/palette_def.c
+    src/st/rno2/popup.c
+    src/st/rno2/prim_helpers.c
+    src/st/rno2/sprite_banks.c
+    src/st/rno2/st_common.c
+    src/st/rno2/st_update.c
+    src/st/rno2/stage_data.c
+    src/st/rno2/tilemaps.c
+    src/st/rno2/gen/e_laydef.c
+    src/st/rno2/gen/e_layout.c
+    src/st/rno2/gen/rooms.c
+    src/st/rno2/gen/us/sprites.c
+)
+set(SOTN_OVL_rno2_DEFS
+)
+
+set(SOTN_OVL_rnz0_SOURCES
+    src/pc/stages/stage_rnz0.c
+    src/st/rnz0/collision.c
+    src/st/rnz0/create_entity.c
+    src/st/rnz0/d_prize_drops.c
+    src/st/rnz0/e_bitterfly.c
+    src/st/rnz0/e_blue_flame_table.c
+    src/st/rnz0/e_breakable.c
+    src/st/rnz0/e_cannon.c
+    src/st/rnz0/e_collect.c
+    src/st/rnz0/e_ctulhu.c
+    src/st/rnz0/e_fire_demon.c
+    src/st/rnz0/e_floor_trap.c
+    src/st/rnz0/e_globe_table.c
+    src/st/rnz0/e_gremlin.c
+    src/st/rnz0/e_imp.c
+    src/st/rnz0/e_init.c
+    src/st/rnz0/e_left_secret_room_wall.c
+    src/st/rnz0/e_lesser_demon.c
+    src/st/rnz0/e_life_max_tank.c
+    src/st/rnz0/e_lock_camera.c
+    src/st/rnz0/e_misc.c
+    src/st/rnz0/e_particles.c
+    src/st/rnz0/e_purple_brick.c
+    src/st/rnz0/e_red_door.c
+    src/st/rnz0/e_red_door_tiles.c
+    src/st/rnz0/e_red_eye_bust.c
+    src/st/rnz0/e_room_bg.c
+    src/st/rnz0/e_room_fg.c
+    src/st/rnz0/e_salem_witch.c
+    src/st/rnz0/e_sealed_door.c
+    src/st/rnz0/e_stage_name.c
+    src/st/rnz0/gfx_banks.c
+    src/st/rnz0/header.c
+    src/st/rnz0/layers.c
+    src/st/rnz0/palette_def.c
+    src/st/rnz0/popup.c
+    src/st/rnz0/prim_helpers.c
+    src/st/rnz0/sprite_banks.c
+    src/st/rnz0/st_common.c
+    src/st/rnz0/st_update.c
+    src/st/rnz0/stage_data.c
+    src/st/rnz0/gen/e_laydef.c
+    src/st/rnz0/gen/e_layout.c
+    src/st/rnz0/gen/rooms.c
+    src/st/rnz0/gen/us/sprites.c
+)
+set(SOTN_OVL_rnz0_DEFS
+)
+
+set(SOTN_OVL_rnz1_SOURCES
+    src/pc/stages/stage_rnz1.c
+    src/st/rnz1/background_block_init.c
+    src/st/rnz1/bossfight.c
+    src/st/rnz1/collision.c
+    src/st/rnz1/create_entity.c
+    src/st/rnz1/d_prize_drops.c
+    src/st/rnz1/d_water_data.c
+    src/st/rnz1/e_bg_gears.c
+    src/st/rnz1/e_bomb_knight.c
+    src/st/rnz1/e_breakable.c
+    src/st/rnz1/e_cloaked_knight.c
+    src/st/rnz1/e_clouds.c
+    src/st/rnz1/e_collect.c
+    src/st/rnz1/e_crusher.c
+    src/st/rnz1/e_darkwing_bat.c
+    src/st/rnz1/e_dw_batwings.c
+    src/st/rnz1/e_explosion_puff_opaque.c
+    src/st/rnz1/e_gear_horizontal.c
+    src/st/rnz1/e_gear_large.c
+    src/st/rnz1/e_gear_puzzle.c
+    src/st/rnz1/e_gear_small.c
+    src/st/rnz1/e_gear_vertical.c
+    src/st/rnz1/e_init.c
+    src/st/rnz1/e_life_up.c
+    src/st/rnz1/e_lock_camera.c
+    src/st/rnz1/e_medusa_head.c
+    src/st/rnz1/e_misc.c
+    src/st/rnz1/e_particles.c
+    src/st/rnz1/e_red_door.c
+    src/st/rnz1/e_red_door_tiles.c
+    src/st/rnz1/e_room_bg.c
+    src/st/rnz1/e_room_fg.c
+    src/st/rnz1/e_secrets.c
+    src/st/rnz1/e_spikes.c
+    src/st/rnz1/e_stage_name.c
+    src/st/rnz1/e_valhalla_knight.c
+    src/st/rnz1/e_water_fg.c
+    src/st/rnz1/graphics_banks.c
+    src/st/rnz1/header.c
+    src/st/rnz1/layers.c
+    src/st/rnz1/palette_def.c
+    src/st/rnz1/popup.c
+    src/st/rnz1/prim_helpers.c
+    src/st/rnz1/sprite_banks.c
+    src/st/rnz1/st_common.c
+    src/st/rnz1/st_update.c
+    src/st/rnz1/stage_data.c
+    src/st/rnz1/tilemaps.c
+    src/st/rnz1/water_effects.c
+    src/st/rnz1/gen/e_laydef.c
+    src/st/rnz1/gen/e_layout.c
+    src/st/rnz1/gen/rooms.c
+    src/st/rnz1/gen/us/sprites.c
+)
+set(SOTN_OVL_rnz1_DEFS
+)
+
+set(SOTN_OVL_rtop_SOURCES
+    src/pc/stages/stage_rtop.c
+    src/st/rtop/collision.c
+    src/st/rtop/create_entity.c
+    src/st/rtop/d_prize_drops.c
+    src/st/rtop/e_breakable.c
+    src/st/rtop/e_breakable_wall.c
+    src/st/rtop/e_clock_tower.c
+    src/st/rtop/e_clouds.c
+    src/st/rtop/e_collect.c
+    src/st/rtop/e_elevator.c
+    src/st/rtop/e_init.c
+    src/st/rtop/e_lion_lamp.c
+    src/st/rtop/e_lock_camera.c
+    src/st/rtop/e_misc.c
+    src/st/rtop/e_particles.c
+    src/st/rtop/e_red_door.c
+    src/st/rtop/e_red_door_tiles.c
+    src/st/rtop/e_richter_fight_trigger.c
+    src/st/rtop/e_room_bg.c
+    src/st/rtop/e_room_fg.c
+    src/st/rtop/e_secret_stairs.c
+    src/st/rtop/e_skull_lord.c
+    src/st/rtop/e_stage_name.c
+    src/st/rtop/e_tombstone.c
+    src/st/rtop/e_warp_trigger.c
+    src/st/rtop/e_yorick.c
+    src/st/rtop/graphics_banks.c
+    src/st/rtop/header.c
+    src/st/rtop/layers.c
+    src/st/rtop/palette_def.c
+    src/st/rtop/popup.c
+    src/st/rtop/prim_helpers.c
+    src/st/rtop/sprite_banks.c
+    src/st/rtop/st_common.c
+    src/st/rtop/st_update.c
+    src/st/rtop/stage_data.c
+    src/st/rtop/tilemaps.c
+    src/st/rtop/gen/e_laydef.c
+    src/st/rtop/gen/e_layout.c
+    src/st/rtop/gen/rooms.c
+    src/st/rtop/gen/sprites.c
+)
+set(SOTN_OVL_rtop_DEFS
 )
 
 set(SOTN_OVL_tt_000_SOURCES
