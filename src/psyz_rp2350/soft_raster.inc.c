@@ -716,6 +716,12 @@ SOFT_RASTER_IRAM static void raster_tile(const SV* v, int w, int h, int semi, in
     int xb = x0 + w - 1 > st.x1 ? st.x1 : x0 + w - 1;
     int ya = y0 < st.y0 ? st.y0 : y0;
     int yb = y0 + h - 1 > st.y1 ? st.y1 : y0 + h - 1;
+    if (xa > xb || ya > yb) {
+        /* entirely outside the draw area: the opaque path below would
+         * otherwise store one pixel at xa when xb - xa + 1 is odd and
+         * negative (a tile just right of the area landed in the margins) */
+        return;
+    }
 
     /* Opaque fill: nothing to read, nothing to interpolate, one colour for
      * every pixel -- so the general per-pixel path is all overhead. It matters

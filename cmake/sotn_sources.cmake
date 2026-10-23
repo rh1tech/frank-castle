@@ -840,17 +840,48 @@ set(SOTN_OVL_rno0_DEFS
 
 set(SOTN_OVL_rno4_SOURCES
     src/pc/stages/stage_rno4.c
+    src/st/rno4/bomb_knight_pc.c
+    src/st/rno4/caverns_pc.c
+    src/st/rno4/cave_troll_pc.c
+    src/st/rno4/collision.c
     src/st/rno4/create_entity.c
-    src/st/rno4/layers.c
+    src/st/rno4/d_prize_drops.c
+    src/st/rno4/data_pc.c
+    src/st/rno4/e_blue_venus_weed.c
+    src/st/rno4/e_breakable_wall.c
+    src/st/rno4/e_collect.c
+    src/st/rno4/e_init.c
+    src/st/rno4/e_killer_fish.c
+    src/st/rno4/e_lock_camera.c
+    src/st/rno4/e_particles.c
     src/st/rno4/e_red_door.c
     src/st/rno4/e_red_door_tiles.c
+    src/st/rno4/e_room_bg.c
     src/st/rno4/e_room_fg.c
+    src/st/rno4/e_stage_name.c
+    src/st/rno4/imp_pc.c
+    src/st/rno4/jack_o_bones_pc.c
+    src/st/rno4/nova_skeleton_pc.c
+    src/st/rno4/graphics_banks.c
+    src/st/rno4/header.c
+    src/st/rno4/layers.c
+    src/st/rno4/palette_def.c
+    src/st/rno4/popup.c
+    src/st/rno4/prim_helpers.c
+    src/st/rno4/sprite_banks.c
     src/st/rno4/st_common.c
     src/st/rno4/st_update.c
-    src/st/rno4/unk_44B0C.c
-    src/st/rno4/gen/rooms.c
     src/st/rno4/stage_data.c
     src/st/rno4/tilemaps.c
+    src/st/rno4/unk_44B0C.c
+    src/st/rno4/unk_52ED0.c
+    src/st/rno4/unk_5511C.c
+    src/st/rno4/unk_55D5C.c
+    src/st/rno4/unk_58A30.c
+    src/st/rno4/gen/e_laydef.c
+    src/st/rno4/gen/e_layout.c
+    src/st/rno4/gen/rooms.c
+    src/st/rno4/gen/sprites.c
 )
 set(SOTN_OVL_rno4_DEFS
 )
