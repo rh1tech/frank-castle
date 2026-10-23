@@ -270,6 +270,7 @@ set(SOTN_OVERLAYS
     rbo7
     nz1
     no1
+    rare
     top
     rcat
     rlib
@@ -1790,6 +1791,52 @@ set(SOTN_OVL_no1_SOURCES
     src/st/no1/gen/sprites.c
 )
 set(SOTN_OVL_no1_DEFS
+)
+
+set(SOTN_OVL_rare_SOURCES
+    src/pc/stages/stage_rare.c
+    src/st/rare/background_block_init.c
+    src/st/rare/collision.c
+    src/st/rare/create_entity.c
+    src/st/rare/d_prize_drops.c
+    src/st/rare/e_azaghal.c
+    src/st/rare/e_background_door_rubble.c
+    src/st/rare/e_boss_doors.c
+    src/st/rare/e_boss_torch.c
+    src/st/rare/e_breakable.c
+    src/st/rare/e_collect.c
+    src/st/rare/e_fountain_water.c
+    src/st/rare/e_init.c
+    src/st/rare/e_lock_camera.c
+    src/st/rare/e_minotaur.c
+    src/st/rare/e_misc.c
+    src/st/rare/e_particles.c
+    src/st/rare/e_red_door.c
+    src/st/rare/e_red_door_tiles.c
+    src/st/rare/e_room_bg.c
+    src/st/rare/e_room_fg.c
+    src/st/rare/e_secrets.c
+    src/st/rare/e_stage_name.c
+    src/st/rare/e_stone_skull.c
+    src/st/rare/e_werewolf.c
+    src/st/rare/e_white_dragon.c
+    src/st/rare/graphics_banks.c
+    src/st/rare/header.c
+    src/st/rare/layers.c
+    src/st/rare/palette_def.c
+    src/st/rare/popup.c
+    src/st/rare/prim_helpers.c
+    src/st/rare/sprite_banks.c
+    src/st/rare/st_common.c
+    src/st/rare/st_update.c
+    src/st/rare/stage_data.c
+    src/st/rare/tilemaps.c
+    src/st/rare/gen/e_laydef.c
+    src/st/rare/gen/e_layout.c
+    src/st/rare/gen/rooms.c
+    src/st/rare/gen/sprites.c
+)
+set(SOTN_OVL_rare_DEFS
 )
 
 set(SOTN_OVL_top_SOURCES
