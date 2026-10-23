@@ -223,6 +223,8 @@ void platform_pad_hold(unsigned bits, unsigned frames) {
     pad_cmd_frames = frames;
 }
 
+extern volatile bool platform_uart_scripted;
+
 static unsigned uart_pad_bits(void) {
     int ch;
     static bool in_tilde; /* "~...~" is a command, not key presses */
@@ -230,7 +232,10 @@ static unsigned uart_pad_bits(void) {
     while ((ch = getchar_timeout_us(0)) >= 0) {
         platform_uart_cmd(ch);
         if (ch == '~') in_tilde = !in_tilde;
-        if (in_tilde || ch == '~') continue;
+        /* once a script talks in "~C ...~" commands, letters are never
+         * keys: a "~" lost on the wire would otherwise turn command text
+         * ("pad" = Start, Left, Right) into presses */
+        if (in_tilde || ch == '~' || platform_uart_scripted) continue;
         for (unsigned i = 0; i < sizeof(uart_map) / sizeof(uart_map[0]); i++)
             if (uart_map[i].c == (char)ch) uart_hold[uart_map[i].bit] = UART_HOLD;
     }

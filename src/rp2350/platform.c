@@ -64,6 +64,7 @@ void __attribute__((noreturn)) platform_reboot(bool bootsel) {
 }
 
 static char dbg_cmd[96];
+volatile bool platform_uart_scripted; /* a "~C" command came: letters stop being keys */
 static volatile bool dbg_cmd_ready;
 
 /* the game thread takes the pending "~C ...~" command, if any */
@@ -132,6 +133,7 @@ void platform_uart_cmd(int ch) {
             cst = 2;
         } else if (cst == 2 && ch == ' ') {
             cst = 3;
+            platform_uart_scripted = true;
             clen = 0;
         } else {
             cst = 0;
