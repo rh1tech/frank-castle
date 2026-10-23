@@ -20,6 +20,7 @@
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/irq.h"
+#include "hardware/structs/psm.h"
 #include "hardware/structs/qmi.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
@@ -42,7 +43,19 @@
 void __attribute__((noreturn)) platform_reboot(bool bootsel) {
     extern void uart_buffered_flush(void);
     uart_buffered_flush(); /* crash reports sit in the ring until drained */
-    if (get_core_num() == 0) multicore_reset_core1();
+    if (get_core_num() == 0) {
+        /* stop core 1 (it may be reading PSRAM). Not multicore_reset_core1():
+         * that waits for core 1's boot ROM to answer on the FIFO, and hung
+         * here once; we are rebooting anyway, so just force it off. */
+        hw_set_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);
+        while (!(psm_hw->frce_off & PSM_FRCE_OFF_PROC1_BITS)) tight_loop_contents();
+        busy_wait_us(10);
+        /* release it again: it restarts into the boot ROM, which waits for a
+         * launch and does not touch PSRAM. Left forced off, the bit survives
+         * the watchdog reboot and the chip does not come back. */
+        hw_clear_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);
+        busy_wait_us(10);
+    }
     save_and_disable_interrupts();
     psram_reset_to_spi();
     if (bootsel) reset_usb_boot(0, 0);

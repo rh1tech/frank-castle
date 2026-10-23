@@ -781,19 +781,52 @@ set(SOTN_OVL_no0_DEFS
 
 set(SOTN_OVL_rno0_SOURCES
     src/pc/stages/stage_rno0.c
+    src/st/rno0/collision.c
     src/st/rno0/create_entity.c
+    src/st/rno0/d_prize_drops.c
+    src/st/rno0/e_background_clock.c
+    src/st/rno0/e_blade.c
+    src/st/rno0/e_breakable.c
+    src/st/rno0/e_caverns_block.c
+    src/st/rno0/e_clock_room.c
+    src/st/rno0/e_collect.c
+    src/st/rno0/e_corridor_decoration.c
+    src/st/rno0/e_elevator.c
+    src/st/rno0/e_floor_trap.c
+    src/st/rno0/e_gorgon.c
+    src/st/rno0/e_guardian.c
+    src/st/rno0/e_gurkha.c
+    src/st/rno0/e_hammer.c
+    src/st/rno0/e_init.c
+    src/st/rno0/e_jack_o_bones.c
+    src/st/rno0/e_lock_camera.c
+    src/st/rno0/e_medusa_head.c
     src/st/rno0/e_misc.c
-    src/st/rno0/layers.c
-    src/st/rno0/palette_def.c
-    src/st/rno0/sprite_banks.c
-    src/st/rno0/graphics_banks.c
-    src/st/rno0/stage_data.c
-    src/st/rno0/tilemaps.c
+    src/st/rno0/e_nova_skeleton.c
+    src/st/rno0/e_particles.c
     src/st/rno0/e_red_door.c
     src/st/rno0/e_red_door_tiles.c
+    src/st/rno0/e_room_bg.c
     src/st/rno0/e_room_fg.c
+    src/st/rno0/e_sealed_door.c
+    src/st/rno0/e_stage_name.c
+    src/st/rno0/e_stone_skull.c
+    src/st/rno0/e_subweapon_container.c
+    src/st/rno0/e_thornweed_corpseweed.c
+    src/st/rno0/giantbro_helpers.c
+    src/st/rno0/giantbro_helpers_2.c
+    src/st/rno0/graphics_banks.c
+    src/st/rno0/header.c
+    src/st/rno0/layers.c
+    src/st/rno0/palette_def.c
+    src/st/rno0/popup.c
+    src/st/rno0/prim_helpers.c
+    src/st/rno0/sprite_banks.c
     src/st/rno0/st_common.c
     src/st/rno0/st_update.c
+    src/st/rno0/stage_data.c
+    src/st/rno0/tilemaps.c
+    src/st/rno0/unused_sprites.c
     src/st/rno0/gen/e_laydef.c
     src/st/rno0/gen/e_layout.c
     src/st/rno0/gen/rooms.c
@@ -821,19 +854,51 @@ set(SOTN_OVL_rno4_DEFS
 
 set(SOTN_OVL_rno3_SOURCES
     src/pc/stages/stage_rno3.c
+    src/st/rno3/collision.c
     src/st/rno3/create_entity.c
+    src/st/rno3/d_prize_drops.c
+    src/st/rno3/d_water_data.c
+    src/st/rno3/e_background_bushes_trees.c
+    src/st/rno3/e_background_lightning.c
+    src/st/rno3/e_blue_venus_weed.c
+    src/st/rno3/e_breakable.c
+    src/st/rno3/e_castle_door.c
+    src/st/rno3/e_cavern_door.c
+    src/st/rno3/e_collect.c
+    src/st/rno3/e_dodo.c
+    src/st/rno3/e_dragon_rider.c
+    src/st/rno3/e_fire_warg.c
+    src/st/rno3/e_heartroom.c
+    src/st/rno3/e_init.c
+    src/st/rno3/e_jack_o_bones.c
+    src/st/rno3/e_jewel_sword_puzzle.c
+    src/st/rno3/e_lock_camera.c
     src/st/rno3/e_misc.c
-    src/st/rno3/layers.c
-    src/st/rno3/palette_def.c
-    src/st/rno3/sprite_banks.c
-    src/st/rno3/graphics_banks.c
-    src/st/rno3/stage_data.c
-    src/st/rno3/tilemaps.c
+    src/st/rno3/e_nova_skeleton.c
+    src/st/rno3/e_orobourous.c
+    src/st/rno3/e_particles.c
     src/st/rno3/e_red_door.c
     src/st/rno3/e_red_door_tiles.c
+    src/st/rno3/e_room_bg.c
     src/st/rno3/e_room_fg.c
+    src/st/rno3/e_shutting_window.c
+    src/st/rno3/e_sky_entities.c
+    src/st/rno3/e_stage_name.c
+    src/st/rno3/e_stairway.c
+    src/st/rno3/e_transparent_water.c
+    src/st/rno3/entrance_weights.c
+    src/st/rno3/graphics_banks.c
+    src/st/rno3/header.c
+    src/st/rno3/layers.c
+    src/st/rno3/palette_def.c
+    src/st/rno3/popup.c
+    src/st/rno3/prim_helpers.c
+    src/st/rno3/sprite_banks.c
     src/st/rno3/st_common.c
     src/st/rno3/st_update.c
+    src/st/rno3/stage_data.c
+    src/st/rno3/tilemaps.c
+    src/st/rno3/water_effects.c
     src/st/rno3/gen/e_laydef.c
     src/st/rno3/gen/e_layout.c
     src/st/rno3/gen/us/rooms.c
