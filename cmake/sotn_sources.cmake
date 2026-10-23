@@ -269,6 +269,7 @@ set(SOTN_OVERLAYS
     rbo4
     rbo7
     nz1
+    no1
     top
     rcat
     rlib
@@ -1728,6 +1729,67 @@ set(SOTN_OVL_nz1_SOURCES
     src/st/nz1/gen/sprites.c
 )
 set(SOTN_OVL_nz1_DEFS
+)
+
+set(SOTN_OVL_no1_SOURCES
+    src/pc/stages/stage_no1.c
+    src/st/no1/collision.c
+    src/st/no1/create_entity.c
+    src/st/no1/d_prize_drops.c
+    src/st/no1/e_armor_lord.c
+    src/st/no1/e_blue_axe_knight.c
+    src/st/no1/e_bone_archer.c
+    src/st/no1/e_bone_musket.c
+    src/st/no1/e_breakable.c
+    src/st/no1/e_chair.c
+    src/st/no1/e_collect.c
+    src/st/no1/e_init.c
+    src/st/no1/e_lock_camera.c
+    src/st/no1/e_medusa_head.c
+    src/st/no1/e_misc.c
+    src/st/no1/e_mist_door.c
+    src/st/no1/e_mouse.c
+    src/st/no1/e_particles.c
+    src/st/no1/e_red_door.c
+    src/st/no1/e_red_door_tiles.c
+    src/st/no1/e_room_bg.c
+    src/st/no1/e_room_fg.c
+    src/st/no1/e_secrets.c
+    src/st/no1/e_skeleton.c
+    src/st/no1/e_skeleton_ape.c
+    src/st/no1/e_spear_guard.c
+    src/st/no1/e_stage_name.c
+    src/st/no1/e_sword_lord.c
+    src/st/no1/e_wereskeleton.c
+    src/st/no1/graphics_banks.c
+    src/st/no1/header.c
+    src/st/no1/layers.c
+    src/st/no1/palette_def.c
+    src/st/no1/popup.c
+    src/st/no1/prim_helpers.c
+    src/st/no1/sprite_banks.c
+    src/st/no1/st_common.c
+    src/st/no1/st_update.c
+    src/st/no1/bss_pc.c
+    src/st/no1/stage_data.c
+    src/st/no1/tilemaps.c
+    src/st/no1/unk_36490.c
+    src/st/no1/unk_381E8.c
+    src/st/no1/unk_38F50.c
+    src/st/no1/unk_39028.c
+    src/st/no1/unk_39184.c
+    src/st/no1/unk_3A290.c
+    src/st/no1/unk_3B5E0.c
+    src/st/no1/unk_3D8AC.c
+    src/st/no1/unk_3FA34.c
+    src/st/no1/unk_40E98.c
+    src/st/no1/unk_54400.c
+    src/st/no1/gen/e_laydef.c
+    src/st/no1/gen/e_layout.c
+    src/st/no1/gen/rooms.c
+    src/st/no1/gen/sprites.c
+)
+set(SOTN_OVL_no1_DEFS
 )
 
 set(SOTN_OVL_top_SOURCES
