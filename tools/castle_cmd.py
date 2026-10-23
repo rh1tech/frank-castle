@@ -30,15 +30,40 @@ class Castle:
         self.buf = b""
         self.log = []  # every complete line seen
 
+    def _reopen(self):
+        """the probe's USB serial port sometimes drops and comes back"""
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+        end = time.time() + 60
+        while True:
+            try:
+                self.fd = open_port()
+                return
+            except OSError:
+                if time.time() > end:
+                    raise
+                time.sleep(1)
+
+    def _write(self, data):
+        try:
+            os.write(self.fd, data)
+        except OSError:
+            self._reopen()
+            os.write(self.fd, data)
+
     def _read(self, secs):
         end = time.time() + secs
         while True:
-            r, _, _ = select.select([self.fd], [], [], max(0, min(0.05, end - time.time())))
-            if r:
-                try:
+            try:
+                r, _, _ = select.select([self.fd], [], [], max(0, min(0.05, end - time.time())))
+                if r:
                     self.buf += os.read(self.fd, 4096)
-                except BlockingIOError:
-                    pass
+            except BlockingIOError:
+                pass
+            except OSError:
+                self._reopen()
             while b"\n" in self.buf:
                 line, self.buf = self.buf.split(b"\n", 1)
                 self.log.append(line.decode("utf-8", "replace").rstrip("\r"))
@@ -68,10 +93,10 @@ class Castle:
     def boot(self, stage, secs=30):
         """reboot and start STAGE (extra --args allowed); True once in play"""
         m = self.mark()
-        os.write(self.fd, b"~RST~")
+        self._write(b"~RST~")
         if not self.wait_for(r"~ARGS\?", 8, m):
             return False
-        os.write(self.fd, ("~ARGS --stage %s~" % stage).encode())
+        self._write(("~ARGS --stage %s~" % stage).encode())
         if self.wait_for(r"\[perf\] \d+ fps", secs, m) is None:
             return False
         end = time.time() + secs
@@ -85,13 +110,13 @@ class Castle:
     def cmd(self, line, secs=3):
         """send a debug command; its "~R ..." reply (without the prefix)"""
         m = self.mark()
-        os.write(self.fd, ("~C %s~" % line).encode())
+        self._write(("~C %s~" % line).encode())
         r = self.wait_for(r"^~R ", secs, m)
         return r[3:] if r else None
 
     def rooms(self):
         m = self.mark()
-        os.write(self.fd, b"~C rooms~")
+        self._write(b"~C rooms~")
         if not self.wait_for(r"^~R ROOMS \d+", 5, m):
             return []
         out = []
@@ -124,7 +149,7 @@ class Castle:
 
     def pad(self, bits, frames):
         """hold pad bits for frames (blocks for that long)"""
-        os.write(self.fd, ("~C pad %x %d~" % (bits, frames)).encode())
+        self._write(("~C pad %x %d~" % (bits, frames)).encode())
         self._read(frames * FRAME + 0.05)
 
     def problems(self, mark=0):
