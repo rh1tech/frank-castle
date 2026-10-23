@@ -63,6 +63,18 @@ void __attribute__((noreturn)) platform_reboot(bool bootsel) {
     while (1) tight_loop_contents();
 }
 
+static char dbg_cmd[96];
+static volatile bool dbg_cmd_ready;
+
+/* the game thread takes the pending "~C ...~" command, if any */
+int Platform_DebugCmdLine(char *out, int n) {
+    if (!dbg_cmd_ready) return 0;
+    strncpy(out, dbg_cmd, (size_t)n - 1);
+    out[n - 1] = 0;
+    dbg_cmd_ready = false;
+    return 1;
+}
+
 /* "~BOOT~" on the UART reboots into BOOTSEL, so the board can be reflashed
  * over USB (picotool) without touching it. Feed every received byte here. */
 void platform_uart_cmd(int ch) {
@@ -91,6 +103,39 @@ void platform_uart_cmd(int ch) {
         extern volatile bool psxv_perf_verbose __attribute__((weak));
         vpos = 0;
         if (&psxv_perf_verbose) psxv_perf_verbose = !psxv_perf_verbose;
+    }
+    /* "~C LINE~": a debug command for the game thread (src/pc/debug_cmd.c),
+     * except "pad BITS FRAMES", handled by the pad code */
+    {
+        static char line[96];
+        static int cst, clen;
+        if (cst == 3) {
+            if (ch == '~') {
+                line[clen] = 0;
+                cst = 0;
+                unsigned bits, frames;
+                if (sscanf(line, "pad %x %u", &bits, &frames) == 2) {
+                    extern void platform_pad_hold(unsigned bits, unsigned frames) __attribute__((weak));
+                    if (platform_pad_hold) platform_pad_hold(bits, frames);
+                } else if (!dbg_cmd_ready) {
+                    memcpy(dbg_cmd, line, (size_t)clen + 1);
+                    dbg_cmd_ready = true;
+                }
+            } else if (clen < (int)sizeof(line) - 1) {
+                line[clen++] = (char)ch;
+            } else {
+                cst = 0;
+            }
+        } else if (ch == '~') {
+            cst = 1;
+        } else if (cst == 1 && ch == 'C') {
+            cst = 2;
+        } else if (cst == 2 && ch == ' ') {
+            cst = 3;
+            clen = 0;
+        } else {
+            cst = 0;
+        }
     }
     /* "~PROF~": profile from now on (profiler builds link profiler_rearm) */
     extern void profiler_rearm(void) __attribute__((weak));

@@ -6,6 +6,7 @@ set(SOTN_CORE_SOURCES
     src/pc/sotn.c
     src/pc/replay.c
     src/pc/spawn_point.c
+    src/pc/debug_cmd.c
     src/pc/pc.c
     src/pc/cutscene_pc.c
     src/pc/io.c

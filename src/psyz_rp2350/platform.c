@@ -215,15 +215,30 @@ static const struct {
     {' ', 8},  {'o', 8},                         /* select */
 };
 
+/* "~C pad BITS FRAMES~" (tools/castle_cmd.py): hold exactly these pad bits
+ * for that many frames */
+static unsigned pad_cmd_bits, pad_cmd_frames;
+void platform_pad_hold(unsigned bits, unsigned frames) {
+    pad_cmd_bits = bits;
+    pad_cmd_frames = frames;
+}
+
 static unsigned uart_pad_bits(void) {
     int ch;
+    static bool in_tilde; /* "~...~" is a command, not key presses */
     extern void platform_uart_cmd(int ch);
     while ((ch = getchar_timeout_us(0)) >= 0) {
         platform_uart_cmd(ch);
+        if (ch == '~') in_tilde = !in_tilde;
+        if (in_tilde || ch == '~') continue;
         for (unsigned i = 0; i < sizeof(uart_map) / sizeof(uart_map[0]); i++)
             if (uart_map[i].c == (char)ch) uart_hold[uart_map[i].bit] = UART_HOLD;
     }
     unsigned bits = 0;
+    if (pad_cmd_frames) {
+        pad_cmd_frames--;
+        bits = pad_cmd_bits;
+    }
     for (int b = 0; b < 16; b++)
         if (uart_hold[b]) {
             uart_hold[b]--;
