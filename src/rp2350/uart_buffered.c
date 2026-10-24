@@ -22,7 +22,7 @@
 #include "hardware/irq.h"
 #include "hardware/uart.h"
 
-#define RING 4096 /* power of two */
+#define RING 2048 /* power of two; SRAM is tight */
 
 static char ring[RING];
 static volatile uint32_t wr, rd;

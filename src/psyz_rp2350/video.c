@@ -614,6 +614,18 @@ static void frame_stats(uint64_t work_us) {
                soft_tg_px[0][0] / stat_frames, soft_tg_px[0][1] / stat_frames, soft_tg_px[0][2] / stat_frames,
                soft_tg_px[1][0] / stat_frames, soft_tg_px[1][1] / stat_frames, soft_tg_px[1][2] / stat_frames);
             for (int k = 0; k < 6; k++) soft_tg_px[k / 3][k % 3] = 0;
+            extern unsigned soft_tg_rd, soft_tg_rd2;
+            PV("[perf] span_tg4 texture reads/frame: fixed row %u, varying %u\n", soft_tg_rd / stat_frames,
+               soft_tg_rd2 / stat_frames);
+            soft_tg_rd = soft_tg_rd2 = 0;
+            extern unsigned soft_tex_copies;
+            PV("[perf] texture copies to SRAM: %u/frame\n", soft_tex_copies / stat_frames);
+            soft_tex_copies = 0;
+            extern int soft_tg_log[24][7], soft_tg_logn;
+            for (int k = 0; k < soft_tg_logn; k++)
+                PV("[perf] tg tri tpage %x clut %x uv %d,%d..%d,%d box %d px\n", soft_tg_log[k][0], soft_tg_log[k][1],
+                   soft_tg_log[k][2], soft_tg_log[k][3], soft_tg_log[k][4], soft_tg_log[k][5], soft_tg_log[k][6]);
+            soft_tg_logn = 0;
 
         }
         {

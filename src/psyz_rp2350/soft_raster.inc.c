@@ -331,6 +331,9 @@ static inline void put_flat(u16* dst, int r8, int g8, int b8, int semi,
     }
 }
 
+int soft_tg_log[24][7], soft_tg_logn; /* first textured gouraud triangles of a window (perf log) */
+unsigned soft_tg_rd, soft_tg_rd2; /* texture halfword reads in span_tg4 (rows fixed / not), perf log */
+
 // Span inner loops for the textured triangle paths, one function per texel
 // depth: with the whole triangle setup inlined around it, the per-pixel loop
 // ran out of registers and reloaded half its state from the stack on every
@@ -343,7 +346,73 @@ typedef struct {
     const u16 *lr, *lg, *lb; // flat modulation tables (exactly mod5(c, col))
     int neutral;             // colour 0x808080: the tables are the identity
     const uint32_t* mclut;   // modulated palette (sprites): colour | STP | 1<<16 if drawn
+    int pitch;               // texel rows of page are this many halfwords apart
 } SpanCtx;
+
+#ifdef SOFT_TEX_SRAM_BYTES
+// A big 4bpp triangle samples its texture from a copy in internal SRAM: a
+// texel read from PSRAM costs ~60 ns even when the XIP cache hits, and
+// scenery reuses one small texture across many triangles (lava: ~15k reads
+// a frame from 4 KB). One block per core, the bounding box of the
+// triangle's texels, or of this one and the last if both fit. Any VRAM
+// write over a block drops it (soft_tex_forget).
+typedef struct {
+    int x0, y0, w, h; // VRAM halfword rectangle copied
+    volatile int valid;
+    int credit; // hits earn it, misses spend it: a used block is not evicted
+} TexBlk;
+static TexBlk texblk_c[SOFT_NCORE];
+static u16 texblk_buf_c[SOFT_NCORE][SOFT_TEX_SRAM_BYTES / 2] __attribute__((aligned(4)));
+unsigned soft_tex_copies; // perf log
+
+static void soft_tex_forget(int x, int y, int w, int h) {
+    for (int c = 0; c < SOFT_NCORE; c++) {
+        TexBlk* b = &texblk_c[c];
+        if (b->valid && x < b->x0 + b->w && x + w > b->x0 && y < b->y0 + b->h && y + h > b->y0)
+            b->valid = 0;
+    }
+}
+
+// page origin for texels u0..u1, v0..v1 of the 4bpp page at (tpx, tpy), so
+// that page[v * *pitch + (u >> 2)] reads the copy; NULL: use VRAM
+static const u16* soft_tex_sram(int tpx, int tpy, int u0, int v0, int u1, int v1, int* pitch) {
+    TexBlk* b = &texblk_c[SOFT_CORE_ID()];
+    // a texel of margin: interpolated coordinates can round one past a vertex
+    int x0 = tpx + ((u0 > 0 ? u0 - 1 : 0) >> 2), x1 = tpx + ((u1 < 255 ? u1 + 1 : 255) >> 2);
+    int y0 = tpy + (v0 > 0 ? v0 - 1 : 0), y1 = tpy + (v1 < 255 ? v1 + 1 : 255);
+    if (b->valid && x0 >= b->x0 && x1 < b->x0 + b->w && y0 >= b->y0 && y1 < b->y0 + b->h) {
+        if (b->credit < 64) b->credit += 2;
+    } else {
+        if (b->valid && b->credit > 0) { // in use: this triangle reads VRAM
+            b->credit--;
+            return NULL;
+        }
+        if (b->valid) { // cover the last block too if the union fits
+            int ux0 = x0 < b->x0 ? x0 : b->x0, uy0 = y0 < b->y0 ? y0 : b->y0;
+            int ux1 = x1 > b->x0 + b->w - 1 ? x1 : b->x0 + b->w - 1;
+            int uy1 = y1 > b->y0 + b->h - 1 ? y1 : b->y0 + b->h - 1;
+            if ((ux1 - ux0 + 1) * (uy1 - uy0 + 1) * 2 <= SOFT_TEX_SRAM_BYTES)
+                x0 = ux0, y0 = uy0, x1 = ux1, y1 = uy1;
+        }
+        int w = x1 - x0 + 1, h = y1 - y0 + 1;
+        if (w * h * 2 > SOFT_TEX_SRAM_BYTES) {
+            return NULL;
+        }
+        b->valid = 0;
+        u16* dst = texblk_buf_c[SOFT_CORE_ID()];
+        for (int j = 0; j < h; j++) {
+            const u16* src = vram + (y0 + j) * VRAM_PITCH + x0;
+            for (int k = 0; k < w; k++) dst[j * w + k] = src[k];
+        }
+        b->x0 = x0, b->y0 = y0, b->w = w, b->h = h;
+        b->credit = 2;
+        b->valid = 1;
+        soft_tex_copies++;
+    }
+    *pitch = b->w;
+    return texblk_buf_c[SOFT_CORE_ID()] - (b->y0 - tpy) * b->w - (b->x0 - tpx);
+}
+#endif
 
 // 4bpp: one halfword holds four texels; re-read it only when the sample
 // moves to another one (scaled and rotated spans revisit it often)
@@ -352,17 +421,18 @@ typedef struct {
         int key_ = v << 8 | u >> 2;                                            \
         if (key_ != hw_key) {                                                  \
             hw_key = key_;                                                     \
-            hw = TEX_RD(&page[v * VRAM_PITCH + (u >> 2)]);                     \
+            hw = TEX_RD(&page[v * pitch + (u >> 2)]);                          \
         }                                                                      \
         texel = clut[(hw >> ((u & 3) * 4)) & 0xF];                             \
     } while (0)
-#define TEXEL8 texel = clut[(TEX_RD(&page[v * VRAM_PITCH + (u >> 1)]) >> ((u & 1) * 8)) & 0xFF]
-#define TEXEL15 texel = TEX_RD(&page[v * VRAM_PITCH + u])
+#define TEXEL8 texel = clut[(TEX_RD(&page[v * pitch + (u >> 1)]) >> ((u & 1) * 8)) & 0xFF]
+#define TEXEL15 texel = TEX_RD(&page[v * pitch + u])
 
 #define DEF_SPAN_TF(NAME, FETCH)                                                \
     SOFT_RASTER_IRAM static void NAME(u16* dst, int n, int32_t ui, int32_t vi, \
                                       const SpanCtx* c) {                       \
         const u16 *page = c->page, *clut = c->clut;                             \
+        const int pitch = c->pitch;                                             \
         const u16 *lr = c->lr, *lg = c->lg, *lb = c->lb;                        \
         int32_t udx = c->udx, vdx = c->vdx;                                     \
         int semi = c->semi;                                                     \
@@ -391,6 +461,7 @@ typedef struct {
                                       int32_t ri, int32_t gi, int32_t bi,       \
                                       const SpanCtx* c) {                       \
         const u16 *page = c->page, *clut = c->clut;                             \
+        const int pitch = c->pitch;                                             \
         int32_t udx = c->udx, vdx = c->vdx;                                     \
         int32_t rdx = c->rdx, gdx = c->gdx, bdx = c->bdx;                       \
         int hw_key = -1;                                                        \
@@ -428,7 +499,7 @@ SOFT_RASTER_IRAM static void span_tf4(u16* dst, int n, int32_t ui, int32_t vi,
         span_tf4_gen(dst, n, ui, vi, c);
         return;
     }
-    const u16* trow = c->page + ((vi >> 16) & 0xFF) * VRAM_PITCH;
+    const u16* trow = c->page + ((vi >> 16) & 0xFF) * c->pitch;
     const u16 *clut = c->clut, *lr = c->lr, *lg = c->lg, *lb = c->lb;
     int32_t udx = c->udx;
     int semi = c->semi, neutral = c->neutral;
@@ -450,7 +521,72 @@ SOFT_RASTER_IRAM static void span_tf4(u16* dst, int n, int32_t ui, int32_t vi,
 }
 DEF_SPAN_TF(span_tf8, TEXEL8)
 DEF_SPAN_TF(span_tf15, TEXEL15)
-DEF_SPAN_TG(span_tg4, TEXEL4)
+DEF_SPAN_TG(span_tg4_gen, TEXEL4)
+
+// Opaque 4bpp textured gouraud (lava, lit scenery): the generic loop carried
+// three 16.16 colour accumulators plus their steps and spilled to the stack
+// on every pixel. Red and blue go into one register as two 8.8 lanes stepped
+// together (UADD16: no carry between lanes), green alone; the texel row is
+// fixed when vdx is 0. Colours lose the 16.16 fraction: at most one step of
+// drift over a 256-pixel span.
+#if defined(__ARM_FEATURE_DSP)
+#include <arm_acle.h>
+SOFT_RASTER_IRAM static void span_tg4(u16* dst, int n, int32_t ui, int32_t vi,
+                                      int32_t ri, int32_t gi, int32_t bi,
+                                      const SpanCtx* c) {
+    if (c->semi) {
+        span_tg4_gen(dst, n, ui, vi, ri, gi, bi, c);
+        return;
+    }
+    const u16* clut = c->clut;
+    const int32_t udx = c->udx;
+    uint32_t rb = (((uint32_t)ri >> 8) & 0xFFFF) | (((uint32_t)bi << 8) & 0xFFFF0000u);
+    uint32_t rbd = (((uint32_t)c->rdx >> 8) & 0xFFFF) | (((uint32_t)c->bdx << 8) & 0xFFFF0000u);
+    int32_t gd = c->gdx;
+    u16* end = dst + n;
+    if (c->vdx == 0) {
+        const u16* trow = c->page + ((vi >> 16) & 0xFF) * c->pitch;
+        int hw_idx = -1;
+        uint32_t hw = 0;
+        for (; dst < end; dst++, ui += udx, rb = __uadd16(rb, rbd), gi += gd) {
+            int u = (ui >> 16) & 0xFF;
+            if ((u >> 2) != hw_idx) {
+                hw_idx = u >> 2;
+                hw = TEX_RD(&trow[hw_idx]);
+                soft_tg_rd++;
+            }
+            uint32_t texel = clut[(hw >> ((u & 3) * 4)) & 0xF];
+            if (!texel) continue;
+            uint32_t r = __usat((int32_t)(((texel & 0x1F) * ((rb >> 8) & 0xFF)) >> 7), 5);
+            uint32_t g = __usat((int32_t)((((texel >> 5) & 0x1F) * ((uint32_t)gi >> 16 & 0xFF)) >> 7), 5);
+            uint32_t b = __usat((int32_t)((((texel >> 10) & 0x1F) * (rb >> 24)) >> 7), 5);
+            *dst = (u16)(r | (g << 5) | (b << 10) | (texel & 0x8000));
+        }
+        return;
+    }
+    const u16* page = c->page;
+    const int32_t vdx = c->vdx, pitch = c->pitch;
+    int hw_key = -1;
+    uint32_t hw = 0;
+    for (; dst < end; dst++, ui += udx, vi += vdx, rb = __uadd16(rb, rbd), gi += gd) {
+        int u = (ui >> 16) & 0xFF, v = (vi >> 16) & 0xFF;
+        int key = v << 8 | u >> 2;
+        if (key != hw_key) {
+            hw_key = key;
+            hw = TEX_RD(&page[v * pitch + (u >> 2)]);
+            soft_tg_rd2++;
+        }
+        uint32_t texel = clut[(hw >> ((u & 3) * 4)) & 0xF];
+        if (!texel) continue;
+        uint32_t r = __usat((int32_t)(((texel & 0x1F) * ((rb >> 8) & 0xFF)) >> 7), 5);
+        uint32_t g = __usat((int32_t)((((texel >> 5) & 0x1F) * ((uint32_t)gi >> 16 & 0xFF)) >> 7), 5);
+        uint32_t b = __usat((int32_t)((((texel >> 10) & 0x1F) * (rb >> 24)) >> 7), 5);
+        *dst = (u16)(r | (g << 5) | (b << 10) | (texel & 0x8000));
+    }
+}
+#else
+#define span_tg4 span_tg4_gen
+#endif
 DEF_SPAN_TG(span_tg8, TEXEL8)
 DEF_SPAN_TG(span_tg15, TEXEL15)
 
@@ -633,7 +769,7 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
         }
     }
     SpanCtx sc = {t.page, t.clut, 0, 0, 0, 0, 0, semi, t.abr, lr, lg, lb,
-                  v->r == 0x80 && v->g == 0x80 && v->b == 0x80, 0};
+                  v->r == 0x80 && v->g == 0x80 && v->b == 0x80, 0, VRAM_PITCH};
 #undef lkey
     if (SOFT_MAIN_CORE() && !tile && !sc.neutral && t.bpp <= 1 && (i1 - i0 + 1) * (j1 - j0 + 1) >= 512) {
         // Coloured palettised sprite (title/menu backdrops): modulate the
@@ -907,8 +1043,25 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
     int bias2 = (A2 > 0 || (A2 == 0 && B2 > 0)) ? 0 : -1;
 
     Tex t;
+    int tpitch = VRAM_PITCH;
     if (textured) {
         t = tex_from(tpage, clut);
+#ifdef SOFT_TEX_SRAM_BYTES
+        if (t.bpp == 0 && (maxx - minx + 1) * (maxy - miny + 1) >= 512) {
+            int u0 = a->u < b->u ? a->u : b->u, v0 = a->v < b->v ? a->v : b->v;
+            int u1 = a->u > b->u ? a->u : b->u, v1 = a->v > b->v ? a->v : b->v;
+            if (c->u < u0) u0 = c->u;
+            if (c->u > u1) u1 = c->u;
+            if (c->v < v0) v0 = c->v;
+            if (c->v > v1) v1 = c->v;
+            int p;
+            const u16* sp = soft_tex_sram((tpage & 0xF) * 64, ((tpage >> 4) & 1) * 256, u0, v0, u1, v1, &p);
+            if (sp) {
+                t.page = sp;
+                tpitch = p;
+            }
+        }
+#endif
     }
 
     int w0row = A0 * minx + B0 * miny + C0 + bias0;
@@ -1044,7 +1197,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
         }
 #undef lkey
         SpanCtx sc = {t.page, t.clut, udx, vdx, 0, 0, 0, semi, t.abr, lr, lg, lb,
-                      a->r == 0x80 && a->g == 0x80 && a->b == 0x80, 0};
+                      a->r == 0x80 && a->g == 0x80 && a->b == 0x80, 0, tpitch};
         for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
                  w2row += B2, urow += udy, vrow += vdy) {
             if (!ROW_MINE(y)) continue;
@@ -1086,7 +1239,18 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
     // the generic loop, with the texel fetch specialised per bpp and the
     // modulation inlined, so the output is identical.
     if (textured && gouraud) {
-        SpanCtx sc = {t.page, t.clut, udx, vdx, rdx, gdx, bdx, semi, t.abr, 0, 0, 0, 0, 0};
+        if (soft_tg_logn < 24 && SOFT_MAIN_CORE()) {
+            int *l = soft_tg_log[soft_tg_logn++];
+            int u0 = a->u < b->u ? a->u : b->u, v0 = a->v < b->v ? a->v : b->v;
+            int u1 = a->u > b->u ? a->u : b->u, v1 = a->v > b->v ? a->v : b->v;
+            if (c->u < u0) u0 = c->u;
+            if (c->u > u1) u1 = c->u;
+            if (c->v < v0) v0 = c->v;
+            if (c->v > v1) v1 = c->v;
+            l[0] = tpage; l[1] = clut; l[2] = u0; l[3] = v0; l[4] = u1; l[5] = v1;
+            l[6] = (maxx - minx + 1) * (maxy - miny + 1);
+        }
+        SpanCtx sc = {t.page, t.clut, udx, vdx, rdx, gdx, bdx, semi, t.abr, 0, 0, 0, 0, 0, tpitch};
         for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
                  w2row += B2, rrow += rdy, grow += gdy, brow += bdy,
                  urow += udy, vrow += vdy) {

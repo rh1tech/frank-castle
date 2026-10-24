@@ -153,8 +153,10 @@ volatile uint32_t flush_maint_us, flush_copy_us, flush_rows_skipped; /* diagnost
 static uint32_t seg_hash[VRAM_H][SEGS] __attribute__((section(".psram_bss.seghash")));
 static uint32_t seg_sig[VRAM_H][SEGS] __attribute__((section(".psram_bss.seghash")));
 
+static void soft_tex_forget(int x, int y, int w, int h);
 static void vrow_forget(int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
+    soft_tex_forget(x, y, w, h); /* SRAM texture copies of it are stale */
     if (h > VRAM_H) h = VRAM_H;
     int k0 = x < 0 ? 0 : x / SEG_PX, k1 = (x + w - 1) / SEG_PX;
     if (k1 >= SEGS) k1 = SEGS - 1;
@@ -175,6 +177,7 @@ static inline uint32_t seg_hash16(const u16 *p, int n) {
  * (tried: 2.5x faster copy, no HDMI signal). */
 static void flush_rows(Slot *s, int jfrom, int jto) {
     uint32_t sig = (uint32_t)s->x0 << 16 | (uint32_t)s->w;
+    if (jto > jfrom) soft_tex_forget(s->x0, s->y0 + jfrom, s->w, jto - jfrom);
     int xend = s->x0 + s->w;
     for (int j = jfrom; j < jto; j++) {
         int vy = (s->y0 + j) & (VRAM_H - 1);
@@ -373,6 +376,8 @@ extern void Video_TexWait(void);
  * core 1 has since overwritten (clut_old_for, below) */
 static const u16 *clut_old_for(u16 id, const u16 *src, int n);
 #define SOFT_CLUT_SIDE clut_old_for
+/* big 4bpp triangles read their texture from an SRAM copy (per core) */
+#define SOFT_TEX_SRAM_BYTES 4608
 #define SOFT_RASTER_IRAM __attribute__((section(".time_critical.raster"), noinline))
 #include "soft_raster.inc.c"
 
@@ -1415,12 +1420,17 @@ int Draw_ExequeSync(void) {
      * waits on the card. Late in the frame neither starts: a read or a mix
      * step must not push the frame past vblank. The audio ring holds ~80 ms
      * and VSync tops it up if it ever runs low. */
-    if (time_us_32() - psxv_vsync_ret_us < 9000) Psyz_CdPrefetch();
+    /* ...unless the read-ahead still holds two sectors (~100 ms of music):
+     * then core 0 helps first and reads after, if the frame is still young */
+    extern int Psyz_CdPrefetchLevel(void);
+    bool prefetch_later = Psyz_CdPrefetchLevel() >= 2;
+    if (!prefetch_later && time_us_32() - psxv_vsync_ret_us < 9000) Psyz_CdPrefetch();
     /* the audio this frame needs first, while core 1 draws on its own */
     extern bool Audio_PreHelpFill(void);
     while (Audio_PreHelpFill()) {
     }
     gpu_help();
+    if (prefetch_later && time_us_32() - psxv_vsync_ret_us < 12000) Psyz_CdPrefetch();
     /* light frames (core 1 already done) still top the audio up here: the
      * frame is young, and VSync's emergency top-up is the expensive place */
     while (time_us_32() - psxv_vsync_ret_us < 9000 && Audio_IdleFill()) {
