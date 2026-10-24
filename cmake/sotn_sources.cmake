@@ -262,12 +262,23 @@ set(SOTN_OVERLAYS
     lib
     mad
     bo1
+    bo2
     bo3
+    bo4
+    bo5
+    bo6
+    rbo8
+    rbo6
+    rbo2
+    rbo1
+    bo7
+    bo0
     rcen
     rchi
     rbo0
     rbo3
     rbo4
+    rbo5
     rbo7
     nz1
     no1
@@ -1393,6 +1404,39 @@ set(SOTN_OVL_bo1_SOURCES
 set(SOTN_OVL_bo1_DEFS
 )
 
+set(SOTN_OVL_bo2_SOURCES
+    src/pc/bosses/boss_bo2.c
+    src/boss/bo2/collision.c
+    src/boss/bo2/create_entity.c
+    src/boss/bo2/d_prize_drops.c
+    src/boss/bo2/e_boss_doors.c
+    src/boss/bo2/e_boss_torch.c
+    src/boss/bo2/e_collect.c
+    src/boss/bo2/e_cutscene_dialogue.c
+    src/boss/bo2/e_init.c
+    src/boss/bo2/e_life_up.c
+    src/boss/bo2/e_lock_camera.c
+    src/boss/bo2/e_misc.c
+    src/boss/bo2/e_particles.c
+    src/boss/bo2/e_red_door.c
+    src/boss/bo2/e_red_door_tiles.c
+    src/boss/bo2/e_room_fg.c
+    src/boss/bo2/e_stage_name.c
+    src/boss/bo2/header.c
+    src/boss/bo2/popup.c
+    src/boss/bo2/prim_helpers.c
+    src/boss/bo2/st_common.c
+    src/boss/bo2/st_update.c
+    src/boss/bo2/unk_22258.c
+    src/boss/bo2/unk_224DC.c
+    src/boss/bo2/unk_26EF8.c
+    src/boss/bo2/unk_337D0.c
+    src/boss/bo2/gen/data_pc.S
+    src/boss/bo2/gen/mips2c_pc.c
+)
+set(SOTN_OVL_bo2_DEFS
+)
+
 set(SOTN_OVL_bo3_SOURCES
     src/pc/bosses/boss_bo3.c
     src/boss/bo3/background_block_init.c
@@ -1437,6 +1481,348 @@ set(SOTN_OVL_bo3_SOURCES
     src/boss/bo3/water_effects.c
 )
 set(SOTN_OVL_bo3_DEFS
+)
+
+set(SOTN_OVL_bo4_SOURCES
+    src/pc/bosses/boss_bo4.c
+    src/boss/bo4/background_block_init.c
+    src/boss/bo4/collision.c
+    src/boss/bo4/create_entity.c
+    src/boss/bo4/doors.c
+    src/boss/bo4/dop_anim.c
+    src/boss/bo4/dop_collision.c
+    src/boss/bo4/doppleganger.c
+    src/boss/bo4/doppleganger_anim.c
+    src/boss/bo4/d_prize_drops.c
+    src/boss/bo4/e_breakable.c
+    src/boss/bo4/e_collect.c
+    src/boss/bo4/e_init.c
+    src/boss/bo4/e_life_up.c
+    src/boss/bo4/e_lock_camera.c
+    src/boss/bo4/e_misc.c
+    src/boss/bo4/e_particles.c
+    src/boss/bo4/e_red_door.c
+    src/boss/bo4/e_red_door_tiles.c
+    src/boss/bo4/e_room_bg.c
+    src/boss/bo4/e_room_fg.c
+    src/boss/bo4/e_stage_name.c
+    src/boss/bo4/gen/e_laydef.c
+    src/boss/bo4/gen/e_layout.c
+    src/boss/bo4/gen/rooms.c
+    src/boss/bo4/graphics_banks.c
+    src/boss/bo4/header.c
+    src/boss/bo4/layers.c
+    src/boss/bo4/palette_def.c
+    src/boss/bo4/popup.c
+    src/boss/bo4/sprite_banks.c
+    src/boss/bo4/prim_helpers.c
+    src/boss/bo4/spritesheets.c
+    src/boss/bo4/st_common.c
+    src/boss/bo4/st_update.c
+    src/boss/bo4/stage_data.c
+    src/boss/bo4/unk_365FC.c
+    src/boss/bo4/unk_45648.c
+    src/boss/bo4/unk_46040.c
+    src/boss/bo4/unk_465F0.c
+    src/boss/bo4/unk_49A6C.c
+    src/boss/bo4/unk_50D4C.c
+    src/boss/bo4/bss.c
+    src/boss/bo4/gen/data_pc.S
+)
+set(SOTN_OVL_bo4_DEFS
+)
+
+set(SOTN_OVL_bo5_SOURCES
+    src/pc/bosses/boss_bo5.c
+    src/boss/bo5/background_block_init.c
+    src/boss/bo5/collision.c
+    src/boss/bo5/create_entity.c
+    src/boss/bo5/cutscene_data.c
+    src/boss/bo5/d_prize_drops.c
+    src/boss/bo5/e_bell.c
+    src/boss/bo5/e_breakable.c
+    src/boss/bo5/e_clouds.c
+    src/boss/bo5/e_collect.c
+    src/boss/bo5/e_cutscene_actors.c
+    src/boss/bo5/e_cutscene_dialogue.c
+    src/boss/bo5/e_dai_no2_shortcut.c
+    src/boss/bo5/e_hippogryph.c
+    src/boss/bo5/e_init.c
+    src/boss/bo5/e_life_up.c
+    src/boss/bo5/e_lock_camera.c
+    src/boss/bo5/e_misc.c
+    src/boss/bo5/e_particles.c
+    src/boss/bo5/e_rbo3door.c
+    src/boss/bo5/e_red_door.c
+    src/boss/bo5/e_red_door_tiles.c
+    src/boss/bo5/e_richter_prologue.c
+    src/boss/bo5/e_room_bg.c
+    src/boss/bo5/e_room_bg_2.c
+    src/boss/bo5/e_room_fg.c
+    src/boss/bo5/e_room_fg_2.c
+    src/boss/bo5/e_stage_name.c
+    src/boss/bo5/e_stained_glass.c
+    src/boss/bo5/e_unk_16.c
+    src/boss/bo5/e_unk_29.c
+    src/boss/bo5/graphics_banks.c
+    src/boss/bo5/header.c
+    src/boss/bo5/layers.c
+    src/boss/bo5/pal_stained_glass.c
+    src/boss/bo5/pal_unk.c
+    src/boss/bo5/palette_def.c
+    src/boss/bo5/popup.c
+    src/boss/bo5/prim_helpers.c
+    src/boss/bo5/sprite_banks.c
+    src/boss/bo5/st_common.c
+    src/boss/bo5/st_update.c
+    src/boss/bo5/stage_data.c
+    src/boss/bo5/tilemaps.c
+    src/boss/bo5/gen/e_laydef.c
+    src/boss/bo5/gen/e_layout.c
+    src/boss/bo5/gen/rooms.c
+    src/boss/bo5/gen/us/sprites.c
+    src/boss/bo5/gen/data_pc.S
+    src/boss/bo5/gen/mips2c_pc.c
+)
+set(SOTN_OVL_bo5_DEFS
+)
+
+set(SOTN_OVL_bo6_SOURCES
+    src/pc/bosses/boss_bo6.c
+    src/boss/bo6/collision.c
+    src/boss/bo6/create_entity.c
+    src/boss/bo6/cutscene.c
+    src/boss/bo6/d_prize_drops.c
+    src/boss/bo6/e_breakable.c
+    src/boss/bo6/e_collect.c
+    src/boss/bo6/e_cutscene_actors.c
+    src/boss/bo6/e_init.c
+    src/boss/bo6/e_life_up.c
+    src/boss/bo6/e_lock_camera.c
+    src/boss/bo6/e_misc.c
+    src/boss/bo6/e_particles.c
+    src/boss/bo6/e_red_door_tiles.c
+    src/boss/bo6/e_red_door.c
+    src/boss/bo6/e_room_bg.c
+    src/boss/bo6/e_room_fg.c
+    src/boss/bo6/e_stage_name.c
+    src/boss/bo6/graphics_banks.c
+    src/boss/bo6/header.c
+    src/boss/bo6/layers.c
+    src/boss/bo6/palette_def.c
+    src/boss/bo6/popup.c
+    src/boss/bo6/prim_helpers.c
+    src/boss/bo6/richter.c
+    src/boss/bo6/sprite_banks.c
+    src/boss/bo6/st_common.c
+    src/boss/bo6/st_update.c
+    src/boss/bo6/unused.c
+    src/boss/bo6/us_39144.c
+    src/boss/bo6/us_3E79C.c
+    src/boss/bo6/bo6_pc.c
+    src/boss/bo6/gen/data_pc.S
+    src/boss/bo6/gen/e_laydef.c
+    src/boss/bo6/gen/e_layout.c
+    src/boss/bo6/gen/rooms.c
+)
+set(SOTN_OVL_bo6_DEFS
+)
+
+set(SOTN_OVL_rbo8_SOURCES
+    src/pc/bosses/boss_rbo8.c
+    src/boss/rbo8/collision.c
+    src/boss/rbo8/create_entity.c
+    src/boss/rbo8/d_g__red_door_tiles.c
+    src/boss/rbo8/d_prize_drops.c
+    src/boss/rbo8/e_blade.c
+    src/boss/rbo8/e_collect.c
+    src/boss/rbo8/e_init.c
+    src/boss/rbo8/e_life_up.c
+    src/boss/rbo8/e_lock_camera.c
+    src/boss/rbo8/e_misc.c
+    src/boss/rbo8/e_particles.c
+    src/boss/rbo8/e_red_door.c
+    src/boss/rbo8/e_room_fg.c
+    src/boss/rbo8/e_stage_name.c
+    src/boss/rbo8/giantbro_helpers.c
+    src/boss/rbo8/header.c
+    src/boss/rbo8/popup.c
+    src/boss/rbo8/prim_helpers.c
+    src/boss/rbo8/st_common.c
+    src/boss/rbo8/st_update.c
+    src/boss/rbo8/unk_151E8.c
+    src/boss/rbo8/unk_1546C.c
+    src/boss/rbo8/unk_15868.c
+    src/boss/rbo8/gen/data_pc.S
+    src/boss/rbo8/gen/mips2c_pc.c
+)
+set(SOTN_OVL_rbo8_DEFS
+)
+
+set(SOTN_OVL_rbo6_SOURCES
+    src/pc/bosses/boss_rbo6.c
+    src/boss/rbo6/collision.c
+    src/boss/rbo6/create_entity.c
+    src/boss/rbo6/d_prize_drops.c
+    src/boss/rbo6/e_collect.c
+    src/boss/rbo6/e_cutscene_dialogue.c
+    src/boss/rbo6/e_init.c
+    src/boss/rbo6/e_lock_camera.c
+    src/boss/rbo6/e_misc.c
+    src/boss/rbo6/e_particles.c
+    src/boss/rbo6/e_red_door.c
+    src/boss/rbo6/e_red_door_tiles.c
+    src/boss/rbo6/e_room_fg.c
+    src/boss/rbo6/e_stage_name.c
+    src/boss/rbo6/header.c
+    src/boss/rbo6/popup.c
+    src/boss/rbo6/prim_helpers.c
+    src/boss/rbo6/st_common.c
+    src/boss/rbo6/st_update.c
+    src/boss/rbo6/unk_1D0E4.c
+    src/boss/rbo6/unk_1D690.c
+    src/boss/rbo6/unk_2362C.c
+    src/boss/rbo6/unk_30D68.c
+    src/boss/rbo6/gen/data_pc.S
+    src/boss/rbo6/gen/mips2c_pc.c
+)
+set(SOTN_OVL_rbo6_DEFS
+)
+
+set(SOTN_OVL_rbo2_SOURCES
+    src/pc/bosses/boss_rbo2.c
+    src/boss/rbo2/collision.c
+    src/boss/rbo2/create_entity.c
+    src/boss/rbo2/d_prize_drops.c
+    src/boss/rbo2/e_collect.c
+    src/boss/rbo2/e_cutscene_actors.c
+    src/boss/rbo2/e_cutscene_dialogue.c
+    src/boss/rbo2/e_debug_cerberus_gate.c
+    src/boss/rbo2/e_init.c
+    src/boss/rbo2/e_life_up.c
+    src/boss/rbo2/e_lock_camera.c
+    src/boss/rbo2/e_misc.c
+    src/boss/rbo2/e_particles.c
+    src/boss/rbo2/e_red_door.c
+    src/boss/rbo2/e_red_door_tiles.c
+    src/boss/rbo2/e_room_fg.c
+    src/boss/rbo2/e_stage_name.c
+    src/boss/rbo2/func_us_801a17c8.c
+    src/boss/rbo2/header.c
+    src/boss/rbo2/popup.c
+    src/boss/rbo2/prim_helpers.c
+    src/boss/rbo2/st_common.c
+    src/boss/rbo2/st_update.c
+    src/boss/rbo2/unk_1B000.c
+    src/boss/rbo2/unk_1B284.c
+    src/boss/rbo2/gen/data_pc.S
+    src/boss/rbo2/gen/mips2c_pc.c
+)
+set(SOTN_OVL_rbo2_DEFS
+)
+
+set(SOTN_OVL_rbo1_SOURCES
+    src/pc/bosses/boss_rbo1.c
+    src/boss/rbo1/collision.c
+    src/boss/rbo1/create_entity.c
+    src/boss/rbo1/d_prize_drops.c
+    src/boss/rbo1/e_boss_room.c
+    src/boss/rbo1/e_collect.c
+    src/boss/rbo1/e_init.c
+    src/boss/rbo1/e_life_up.c
+    src/boss/rbo1/e_lock_camera.c
+    src/boss/rbo1/e_misc.c
+    src/boss/rbo1/e_particles.c
+    src/boss/rbo1/e_red_door.c
+    src/boss/rbo1/e_red_door_tiles.c
+    src/boss/rbo1/e_room_fg.c
+    src/boss/rbo1/e_stage_name.c
+    src/boss/rbo1/header.c
+    src/boss/rbo1/popup.c
+    src/boss/rbo1/prim_helpers.c
+    src/boss/rbo1/st_common.c
+    src/boss/rbo1/st_update.c
+    src/boss/rbo1/unk_11FD8.c
+    src/boss/rbo1/unk_12274.c
+    src/boss/rbo1/gen/data_pc.S
+    src/boss/rbo1/gen/mips2c_pc.c
+)
+set(SOTN_OVL_rbo1_DEFS
+)
+
+set(SOTN_OVL_bo7_SOURCES
+    src/pc/bosses/boss_bo7.c
+    src/boss/bo7/collision.c
+    src/boss/bo7/create_entity.c
+    src/boss/bo7/d_prize_drops.c
+    src/boss/bo7/e_breakable_wall.c
+    src/boss/bo7/e_collect.c
+    src/boss/bo7/e_debug_cerberus_gate.c
+    src/boss/bo7/e_demon_switch_wall.c
+    src/boss/bo7/e_init.c
+    src/boss/bo7/e_life_up.c
+    src/boss/bo7/e_lock_camera.c
+    src/boss/bo7/e_misc.c
+    src/boss/bo7/e_particles.c
+    src/boss/bo7/e_red_door.c
+    src/boss/bo7/e_red_door_tiles.c
+    src/boss/bo7/e_room_fg.c
+    src/boss/bo7/e_stage_name.c
+    src/boss/bo7/header.c
+    src/boss/bo7/popup.c
+    src/boss/bo7/prim_helpers.c
+    src/boss/bo7/st_common.c
+    src/boss/bo7/st_update.c
+    src/boss/bo7/unk_12FBC.c
+    src/boss/bo7/unk_13258.c
+    src/boss/bo7/unk_14CE0.c
+    src/boss/bo7/gen/data_pc.S
+    src/boss/bo7/gen/mips2c_pc.c
+)
+set(SOTN_OVL_bo7_DEFS
+)
+
+set(SOTN_OVL_bo0_SOURCES
+    src/pc/bosses/boss_bo0.c
+    src/boss/bo0/2D26C.c
+    src/boss/bo0/3053C.c
+    src/boss/bo0/313A8.c
+    src/boss/bo0/34DA4.c
+    src/boss/bo0/372E8.c
+    src/boss/bo0/create_entity.c
+    src/boss/bo0/e_background_house.c
+    src/boss/bo0/e_bloody_zombie.c
+    src/boss/bo0/e_boss_doors.c
+    src/boss/bo0/e_breakable.c
+    src/boss/bo0/e_chair.c
+    src/boss/bo0/e_collect.c
+    src/boss/bo0/e_laser_attack.c
+    src/boss/bo0/e_life_up.c
+    src/boss/bo0/e_lock_camera.c
+    src/boss/bo0/e_marionette.c
+    src/boss/bo0/e_misc.c
+    src/boss/bo0/e_olrox_drool.c
+    src/boss/bo0/e_owl_knight.c
+    src/boss/bo0/e_particles.c
+    src/boss/bo0/e_prisoner.c
+    src/boss/bo0/e_red_door.c
+    src/boss/bo0/e_room_bg.c
+    src/boss/bo0/e_room_fg.c
+    src/boss/bo0/e_sealed_door.c
+    src/boss/bo0/e_secrets.c
+    src/boss/bo0/e_skelerang.c
+    src/boss/bo0/e_spikes.c
+    src/boss/bo0/e_stage_name.c
+    src/boss/bo0/no2_bg.c
+    src/boss/bo0/popup.c
+    src/boss/bo0/prim_helpers.c
+    src/boss/bo0/st_collision.c
+    src/boss/bo0/st_common.c
+    src/boss/bo0/st_update.c
+    src/boss/bo0/gen/data_pc.S
+    src/boss/bo0/gen/mips2c_pc.c
+)
+set(SOTN_OVL_bo0_DEFS
 )
 
 set(SOTN_OVL_rcen_SOURCES
@@ -1657,6 +2043,52 @@ set(SOTN_OVL_rbo4_SOURCES
     src/boss/rbo4/bss.c
 )
 set(SOTN_OVL_rbo4_DEFS
+)
+
+set(SOTN_OVL_rbo5_SOURCES
+    src/pc/bosses/boss_rbo5.c
+    src/boss/rbo5/background_block_init.c
+    src/boss/rbo5/collision.c
+    src/boss/rbo5/create_entity.c
+    src/boss/rbo5/d_prize_drops.c
+    src/boss/rbo5/doors.c
+    src/boss/rbo5/dop_anim.c
+    src/boss/rbo5/dop_collision.c
+    src/boss/rbo5/doppleganger.c
+    src/boss/rbo5/e_breakable.c
+    src/boss/rbo5/e_collect.c
+    src/boss/rbo5/e_init.c
+    src/boss/rbo5/e_life_up.c
+    src/boss/rbo5/e_lock_camera.c
+    src/boss/rbo5/e_misc.c
+    src/boss/rbo5/e_particles.c
+    src/boss/rbo5/e_red_door_tiles.c
+    src/boss/rbo5/e_red_door.c
+    src/boss/rbo5/e_room_bg.c
+    src/boss/rbo5/e_room_fg.c
+    src/boss/rbo5/e_stage_name.c
+    src/boss/rbo5/graphics_banks.c
+    src/boss/rbo5/header.c
+    src/boss/rbo5/layers.c
+    src/boss/rbo5/palette_def.c
+    src/boss/rbo5/popup.c
+    src/boss/rbo5/prim_helpers.c
+    src/boss/rbo5/sprite_banks.c
+    src/boss/rbo5/st_common.c
+    src/boss/rbo5/st_update.c
+    src/boss/rbo5/stage_data.c
+    src/boss/rbo5/unk_354F0.c
+    src/boss/rbo5/unk_44C48.c
+    src/boss/rbo5/unk_45650.c
+    src/boss/rbo5/unk_45C00.c
+    src/boss/rbo5/unk_4907C.c
+    src/boss/rbo5/unk_502F8.c
+    src/boss/rbo5/gen/e_laydef.c
+    src/boss/rbo5/gen/e_layout.c
+    src/boss/rbo5/gen/rooms.c
+    src/boss/rbo5/gen/data_pc.S
+)
+set(SOTN_OVL_rbo5_DEFS
 )
 
 set(SOTN_OVL_rbo7_SOURCES

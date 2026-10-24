@@ -15,4 +15,4 @@ if ! picotool info >/dev/null 2>&1; then
     done
 fi
 picotool info >/dev/null 2>&1 || { echo "ERROR: board did not enter BOOTSEL" >&2; exit 1; }
-picotool load -x "$UF2" 2>&1 | grep -v "%" 
+picotool load -u -x "$UF2" 2>&1 | grep -v "%" 

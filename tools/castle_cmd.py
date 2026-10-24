@@ -126,6 +126,19 @@ class Castle:
                 out.append(tuple(int(x) for x in g.groups()))
         return out
 
+    def ents(self):
+        """the stage's hittable entities: (index, id, x, y, hp)"""
+        m = self.mark()
+        self._write(b"~C ents~")
+        if not self.wait_for(r"^~R ENTS \d+", 5, m):
+            return []
+        out = []
+        for l in self.since(m):
+            g = re.match(r"~R ENT (\d+) (\d+) (-?\d+) (-?\d+) (-?\d+)", l)
+            if g:
+                out.append(tuple(int(x) for x in g.groups()))
+        return out
+
     def stat(self):
         r = self.cmd("stat")
         if not r or not r.startswith("STAT"):
