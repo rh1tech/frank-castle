@@ -165,7 +165,7 @@ static void __not_in_flash_func(latch_frame)(void) {
     extern volatile uint32_t scan_sram, scan_psram;
     if (Gpu_ScanoutSource(frame_x, frame_y, &base, &stride, &r0, &r1)) {
         scan_sram++;
-        frame_sram = frame_w == 256 ? base : NULL; /* complete 320-px lines */
+        frame_sram = frame_w == 256 ? base : NULL; /* picture + right margin (PSXV_LINE_DOUBLE_LM) */
         frame_sram_stride = stride;
         frame_sram_r0 = r0;
         frame_sram_r1 = r1;
@@ -195,8 +195,10 @@ static void __not_in_flash_func(on_line)(uint32_t out_line, psxv_line_t *line) {
     line->mode = frame_native ? PSXV_LINE_NATIVE : PSXV_LINE_DOUBLE;
     const u16 *sram = frame_sram;
     if (sram && row >= frame_sram_r0 && row < frame_sram_r1) {
-        /* straight from the SRAM framebuffer: no copy, no deadline */
+        /* straight from the SRAM framebuffer: no copy, no deadline. Its rows
+         * hold the picture and the right margin; the HSTX sends the left one */
         line->pixels = sram + row * frame_sram_stride;
+        line->mode = PSXV_LINE_DOUBLE_LM;
         return;
     }
     if (row >= fill_row) { /* shows whatever the slot held */

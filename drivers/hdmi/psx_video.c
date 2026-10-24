@@ -158,9 +158,15 @@ static uint32_t vactive_line_dvi[] = {
     HSTX_CMD_RAW_REPEAT | MODE_H_FRONT_PORCH, SYNC_V1_H1, HSTX_CMD_NOP,
     HSTX_CMD_RAW_REPEAT | MODE_H_SYNC_WIDTH,  SYNC_V1_H0, HSTX_CMD_NOP,
     HSTX_CMD_RAW_REPEAT | MODE_H_BACK_PORCH,  SYNC_V1_H1, HSTX_CMD_TMDS | MODE_H_ACTIVE_PIXELS};
+/* the same with the left margin sent as black by the HSTX (PSXV_LINE_DOUBLE_LM) */
+static uint32_t vactive_line_dvi_lm[] = {
+    HSTX_CMD_RAW_REPEAT | MODE_H_FRONT_PORCH, SYNC_V1_H1, HSTX_CMD_NOP,
+    HSTX_CMD_RAW_REPEAT | MODE_H_SYNC_WIDTH,  SYNC_V1_H0, HSTX_CMD_NOP,
+    HSTX_CMD_RAW_REPEAT | MODE_H_BACK_PORCH,  SYNC_V1_H1, HSTX_CMD_TMDS_REPEAT | PSXV_LM_OUT, 0,
+    HSTX_CMD_TMDS | (MODE_H_ACTIVE_PIXELS - PSXV_LM_OUT)};
 
-static uint32_t vactive_di_ping[128], vactive_di_pong[128], vactive_di_null[128];
-static uint32_t vactive_di_len, vactive_di_null_len;
+static uint32_t vactive_di_ping[128], vactive_di_pong[128], vactive_di_null[128], vactive_di_null_lm[128];
+static uint32_t vactive_di_len, vactive_di_null_len, vactive_di_null_lm_len;
 
 static uint32_t vblank_di_ping[128], vblank_di_pong[128], vblank_di_null[128];
 static uint32_t vblank_di_len, vblank_di_null_len;
@@ -223,7 +229,13 @@ static void __scratch_x("") hstx_resync(void)
 // Internal Helpers
 // ============================================================================
 
+static uint32_t build_line_with_di_lm(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active, bool lm);
 static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active)
+{
+    return build_line_with_di_lm(buf, di_words, vsync, active, false);
+}
+
+static uint32_t build_line_with_di_lm(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active, bool lm)
 {
     uint32_t *p = buf;
     uint32_t sync_h0 = vsync ? SYNC_V0_H0 : SYNC_V1_H0;
@@ -265,8 +277,14 @@ static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool
         *p++ = HSTX_CMD_RAW_REPEAT | W_VIDEO_GUARD_BAND;
         *p++ = VIDEO_GUARD_BAND;
 
-        // Active video pixels
-        *p++ = HSTX_CMD_TMDS | MODE_H_ACTIVE_PIXELS;
+        // Active video pixels (PSXV_LINE_DOUBLE_LM: a black margin first)
+        if (lm) {
+            *p++ = HSTX_CMD_TMDS_REPEAT | PSXV_LM_OUT;
+            *p++ = 0;
+            *p++ = HSTX_CMD_TMDS | (MODE_H_ACTIVE_PIXELS - PSXV_LM_OUT);
+        } else {
+            *p++ = HSTX_CMD_TMDS | MODE_H_ACTIVE_PIXELS;
+        }
     } else {
         *p++ = HSTX_CMD_RAW_REPEAT | (MODE_H_BACK_PORCH + MODE_H_ACTIVE_PIXELS);
         *p++ = sync_h1;
@@ -346,17 +364,21 @@ static inline void __scratch_x("")
     if (line_callback)
         line_callback(active_line, &next_line);
 
+    bool lm = next_line.mode == PSXV_LINE_DOUBLE_LM;
     if (dvi_mode) {
         // Pure DVI: simple active line without Data Islands
-        ch->read_addr = (uintptr_t)vactive_line_dvi;
-        ch->transfer_count = count_of(vactive_line_dvi);
+        ch->read_addr = lm ? (uintptr_t)vactive_line_dvi_lm : (uintptr_t)vactive_line_dvi;
+        ch->transfer_count = lm ? count_of(vactive_line_dvi_lm) : count_of(vactive_line_dvi);
     } else {
         uint32_t *buf = dma_pong ? vactive_di_ping : vactive_di_pong;
         const uint32_t *di_words = hstx_di_queue_get_audio_packet();
         if (di_words) {
-            vactive_di_len = build_line_with_di(buf, di_words, false, true);
+            vactive_di_len = build_line_with_di_lm(buf, di_words, false, true, lm);
             ch->read_addr = (uintptr_t)buf;
             ch->transfer_count = vactive_di_len;
+        } else if (lm) {
+            ch->read_addr = (uintptr_t)vactive_di_null_lm;
+            ch->transfer_count = vactive_di_null_lm_len;
         } else {
             ch->read_addr = (uintptr_t)vactive_di_null;
             ch->transfer_count = vactive_di_null_len;
@@ -403,6 +425,9 @@ static inline void __scratch_x("") video_output_handle_active_data(dma_channel_h
         // 16-bit reads, replicated into both FIFO halves -> pixel doubling
         set_dma_size(ch, DMA_SIZE_16);
         ch->transfer_count = MODE_H_ACTIVE_PIXELS / 2;
+    } else if (next_line.mode == PSXV_LINE_DOUBLE_LM) {
+        set_dma_size(ch, DMA_SIZE_16);
+        ch->transfer_count = (MODE_H_ACTIVE_PIXELS - PSXV_LM_OUT) / 2;
     } else {
         set_dma_size(ch, DMA_SIZE_32);
         ch->transfer_count = MODE_H_ACTIVE_PIXELS / 2;
@@ -565,6 +590,8 @@ void psxv_init(void)
 
     vblank_di_null_len = build_line_with_di(vblank_di_null, hstx_get_null_data_island(false, true), false, false);
     vactive_di_null_len = build_line_with_di(vactive_di_null, hstx_get_null_data_island(false, true), false, true);
+    vactive_di_null_lm_len =
+        build_line_with_di_lm(vactive_di_null_lm, hstx_get_null_data_island(false, true), false, true, true);
 
     vblank_di_len = build_line_with_di(vblank_di_ping, hstx_get_null_data_island(false, true), false, false);
     memcpy(vblank_di_pong, vblank_di_ping, sizeof(vblank_di_ping));

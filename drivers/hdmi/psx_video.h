@@ -10,6 +10,10 @@
  *     16-bit DMA transfers. The bus replicates the halfword into both halves
  *     of the FIFO word, so every pixel is emitted twice -> 640 pixels.
  *   - PSXV_LINE_NATIVE: 640 PS1 pixels (u16), 32-bit DMA, 1:1.
+ *   - PSXV_LINE_DOUBLE_LM: like DOUBLE, but the HSTX itself sends the first
+ *     PSXV_LM_OUT black pixels (a TMDS repeat command): the buffer holds the
+ *     remaining 320 - PSXV_LM_OUT / 2 pixels. Frame buffers then need no
+ *     left margin in memory.
  *
  * The line callback runs in the DMA IRQ during h-blank. It must only hand
  * back a pointer to an already prepared buffer.
@@ -27,7 +31,9 @@
 typedef enum {
     PSXV_LINE_DOUBLE = 0, /* 320 source pixels, each shown twice */
     PSXV_LINE_NATIVE = 1, /* 640 source pixels */
+    PSXV_LINE_DOUBLE_LM = 2, /* black left margin from the HSTX, then 288 doubled */
 } psxv_line_mode_t;
+#define PSXV_LM_OUT 64 /* output pixels of left margin in PSXV_LINE_DOUBLE_LM */
 
 /* Shared between code built with and without -fno-short-enums: no enum
  * fields, every member has an explicit width. */

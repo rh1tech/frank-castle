@@ -40,12 +40,13 @@ typedef long long s64;
 u16 g_PsxVram[VRAM_PITCH * VRAM_H] __attribute__((section(".psram_bss.vram"), aligned(64)));
 
 /* ---- framebuffer slots ---- */
-/* A half slot stores each row as a complete 320-pixel HDMI line: the draw
- * area centred between black margins, so the scanout can DMA SRAM rows
- * as-is. Sized for SOTN's 256x207 letterboxed play area (320x208); together
- * the two halves hold a 512x240 buffer. */
-#define LINE_PX 320
-#define SLOT_PIXELS (LINE_PX * 208)
+/* A half slot stores each row as the right 288 pixels of a 320-pixel HDMI
+ * line: the draw area, then black. The HSTX sends the 32-pixel left margin
+ * itself (PSXV_LINE_DOUBLE_LM), so the scanout DMAs SRAM rows as-is. Holds
+ * SOTN's 256x207 letterboxed play area (288x208); together the two halves
+ * hold a 512x240 buffer. */
+#define LINE_PX 288
+#define SLOT_PIXELS (512 * 240 / 2)
 #define SHADOW_PIXELS (2 * SLOT_PIXELS)
 static u16 shadow_buf[SHADOW_PIXELS] __attribute__((aligned(4)));
 /* Small offscreen render targets (SOTN draws a 63x63 one every scrolling
@@ -59,7 +60,7 @@ typedef struct {
     int x0, y0, w, h;
     int sw;     /* row stride in pixels, even */
     int pad;    /* x0 & 1: pixel (x,y) keeps the address parity it has in VRAM */
-    int margin; /* black pixels left of the area (half slots of width <= 320) */
+    int margin; /* black pixels left of the area (always 0 now: the HSTX sends them) */
     u16 *base;  /* first pixel of row 0 */
     bool used;
     bool whole; /* occupies the whole area (too big for a half) */
@@ -304,8 +305,7 @@ static int slot_for(int x, int y, int w, int h) {
         return 2;
     }
     if (w + pad <= LINE_PX && LINE_PX * h <= SLOT_PIXELS) {
-        margin = (LINE_PX - w) / 2 & ~1;
-        sw = LINE_PX;
+        sw = LINE_PX; /* rows are scanout lines: the area, then black */
     }
     bool whole = sw * h > SLOT_PIXELS;
     if (whole) {
@@ -339,7 +339,7 @@ static int slot_for(int x, int y, int w, int h) {
     Slot *s = &slot[victim];
     u16 *mem = shadow_buf + (whole ? 0 : victim * SLOT_PIXELS);
     *s = (Slot){x, y, w, h, sw, pad, margin, mem + margin + pad, true, whole, false, false};
-    if (margin) memset(mem, 0, (size_t)sw * h * 2); /* black margins */
+    if (sw == LINE_PX) memset(mem, 0, (size_t)sw * h * 2); /* black right margin */
     return victim;
 }
 
@@ -1370,7 +1370,8 @@ void __not_in_flash_func(Gpu_Core1FlushPending)(void) {
 }
 
 /* For the scanout (core 1, at latch time): if a loaded half slot holds the
- * display rectangle starting at (x,y), its rows are complete 320-pixel lines
+ * display rectangle starting at (x,y), its rows are scanout lines (288
+ * pixels: picture, then black)
  * (*row0 = start of the line for display row 0). The draw area is usually
  * shorter than the display (SOTN letterboxes rows 20..226), so only display
  * rows [*r0,*r1) come from it. */
@@ -1378,7 +1379,7 @@ bool __not_in_flash_func(Gpu_ScanoutSource)(int x, int y, const u16 **row0, int 
                                             int *r1) {
     for (int i = 0; i < 2; i++) {
         const Slot *s = &slot[i];
-        if (!s->used || s->whole || !s->loaded || !s->margin || s->x0 != x ||
+        if (!s->used || s->whole || !s->loaded || s->sw != LINE_PX || s->w != 256 || s->x0 != x ||
             s->y0 + s->h <= y || s->y0 >= y + 240)
             continue;
         *row0 = s->base - s->margin - s->pad + (y - s->y0) * s->sw;
