@@ -279,6 +279,13 @@ static int slot_for(int x, int y, int w, int h) {
     for (int i = 0; i < NSLOT; i++)
         if (slot[i].used && slot[i].x0 == x && slot[i].y0 == y && slot[i].w == w && slot[i].h == h)
             return i;
+    /* an area inside a slot draws there: the Colosseum alternates 256x207
+     * and 256x167 areas at one origin, and a new slot for each meant a
+     * 53k-pixel eviction and reload every switch */
+    for (int i = 0; i < NSLOT; i++)
+        if (slot[i].used && x >= slot[i].x0 && y >= slot[i].y0 && x + w <= slot[i].x0 + slot[i].w &&
+            y + h <= slot[i].y0 + slot[i].h)
+            return i;
     int pad = x & 1, sw = (w + pad + 1) & ~1, margin = 0;
     if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > VRAM_W || y + h > VRAM_H ||
         sw * h > SHADOW_PIXELS)

@@ -363,6 +363,9 @@ typedef struct {
 } TexBlk;
 #define TEXBLK_N 2 // per core (light through glass samples two textures)
 static TexBlk texblk_c[SOFT_NCORE][TEXBLK_N];
+// the last box that missed, per core: a box is copied only when it misses
+// twice in a row (a texture used once costs more to copy than to read)
+static int texblk_miss_c[SOFT_NCORE][4];
 static u16 texblk_buf_c[SOFT_NCORE][TEXBLK_N][SOFT_TEX_SRAM_BYTES / 2] __attribute__((aligned(4)));
 unsigned soft_tex_copies; // perf log
 
@@ -391,6 +394,12 @@ static const u16* soft_tex_sram(int tpx, int tpy, int u0, int v0, int u1, int v1
         }
     }
     if (k == TEXBLK_N) {
+        int* lm = texblk_miss_c[SOFT_CORE_ID()];
+        if (!(x0 >= lm[0] && x1 <= lm[2] && y0 >= lm[1] && y1 <= lm[3]) &&
+            !(lm[0] >= x0 && lm[2] <= x1 && lm[1] >= y0 && lm[3] <= y1)) {
+            lm[0] = x0, lm[1] = y0, lm[2] = x1, lm[3] = y1;
+            return NULL; // first time: read VRAM
+        }
         // a block whose union with this box fits, else the one with the least credit
         int victim = -1;
         for (int i = 0; i < TEXBLK_N && victim < 0; i++) {
