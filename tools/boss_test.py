@@ -37,8 +37,22 @@ def main():
     m = c.mark()
     if not c.boot(stage):
         sys.exit("boot failed")
-    if room is not None:
-        c.go(stage, room)
+    c.cmd("god 1")
+    if room is None:
+        # the arena: the room whose toughest enemy has the most HP
+        best = (0, 0)
+        for r in c.rooms():
+            if r[6] == 255:
+                continue
+            c.go(stage, r[0])
+            time.sleep(2)
+            hp = max([e[4] for e in c.ents()] + [0])
+            print("room %d: max HP %d" % (r[0], hp), flush=True)
+            if hp > best[0]:
+                best = (hp, r[0])
+        room = best[1]
+        print("arena: room %d" % room, flush=True)
+    c.go(stage, room)
     c.cmd("god 1")
     t0 = time.time()
     n = 0
@@ -48,10 +62,19 @@ def main():
         n += 1
     t0 = last = time.time()
     side = 0
+    seen = gone = 0  # the boss showed up, then no hittable entity was left
     while time.time() - t0 < secs:
+        if c.problems(m):
+            break  # crashed: the board is rebooting
         c.cmd("ehp 1")
         st = c.stat()
         ents = c.ents()
+        if ents:
+            seen = 1
+        elif seen and st:
+            gone += 1
+            if gone >= 3:
+                break  # defeated
         if st and ents:
             # the boss is usually the entity with the lowest index
             tx = ents[0][2]
@@ -74,6 +97,7 @@ def main():
             grab(os.path.join(out, "%s_%02d.png" % (stage, n)))
             n += 1
     print(c.stat())
+    print("RESULT %s: %s" % (stage, "defeated" if gone >= 3 else "boss seen" if seen else "no boss found"))
     for p in c.problems(m):
         print("PROBLEM", p)
 

@@ -107,6 +107,15 @@ class Castle:
             self._read(0.5)
         return False
 
+    def boot_title(self, secs=40):
+        """reboot to the title screen (no game arguments)"""
+        m = self.mark()
+        self._write(b"~RST~")
+        if not self.wait_for(r"~ARGS\?", 8, m):
+            return False
+        self._write(b"~ARGS ~")
+        return self.wait_for(r"\[perf\] \d+ fps", secs, m) is not None
+
     def cmd(self, line, secs=3):
         """send a debug command; its "~R ..." reply (without the prefix)"""
         m = self.mark()
@@ -121,9 +130,9 @@ class Castle:
             return []
         out = []
         for l in self.since(m):
-            g = re.match(r"~R ROOM (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)", l)
+            g = re.match(r"~R ROOM (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)(?: (\d+))?", l)
             if g:
-                out.append(tuple(int(x) for x in g.groups()))
+                out.append(tuple(int(x) for x in g.groups() if x is not None))
         return out
 
     def ents(self):
