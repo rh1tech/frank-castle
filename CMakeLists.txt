@@ -195,6 +195,10 @@ sotn_str_apply(sotn_core)
 # the decomp's main() becomes sotn_main(), called from src/rp2350/game_main.c
 set_source_files_properties(${SOTN_DIR}/src/pc/main.c TARGET_DIRECTORY sotn_core
     PROPERTIES COMPILE_DEFINITIONS main=sotn_main)
+# the BIOS font src/pc/krom.c embeds (.incbin needs an absolute path)
+set_source_files_properties(${SOTN_DIR}/src/pc/krom.c TARGET_DIRECTORY sotn_core
+    PROPERTIES COMPILE_DEFINITIONS
+    "KROM_FONT_DIR=\"${SOTN_DIR}/tools/psyz/nugget/openbios/charset\"")
 
 add_library(psyz_core OBJECT ${PSYZ_CORE_SOURCES}
     ${SOTN_DIR}/tools/psyz/psyz/src/psyz/libgte_sw_sqrt.c

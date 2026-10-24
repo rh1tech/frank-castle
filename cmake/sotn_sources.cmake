@@ -10,6 +10,7 @@ set(SOTN_CORE_SOURCES
     src/pc/debug_cmd.c
     src/pc/pc.c
     src/pc/cutscene_pc.c
+    src/pc/krom.c
     src/pc/io.c
     src/pc/cdimage.c
     src/pc/disc_provider.c
