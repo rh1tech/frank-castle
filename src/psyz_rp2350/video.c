@@ -627,6 +627,9 @@ static void frame_stats(uint64_t work_us) {
             extern volatile uint16_t tex_flush_log[6];
             PV("[perf] last texture flush: tpage %x clut %x slot %d,%d %dx%d\n", tex_flush_log[0], tex_flush_log[1],
                tex_flush_log[2], tex_flush_log[3], tex_flush_log[4], tex_flush_log[5]);
+            extern unsigned soft_col_sprites;
+            PV("[perf] narrow sprites by columns: %u/frame\n", soft_col_sprites / stat_frames);
+            soft_col_sprites = 0;
             extern unsigned soft_tex_copies;
             PV("[perf] texture copies to SRAM: %u/frame\n", soft_tex_copies / stat_frames);
             soft_tex_copies = 0;

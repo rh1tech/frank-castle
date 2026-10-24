@@ -86,6 +86,9 @@ static u16* const vram = g_PsxVram; // frank-castle: PSRAM VRAM (gpu_fast.c)
 #ifndef DROW
 #define DROW(y) (vram + (y) * VRAM_PITCH)
 #endif
+#ifndef DROW_STRIDE // DROW(y + 1) - DROW(y)
+#define DROW_STRIDE() VRAM_PITCH
+#endif
 #ifndef TEX_HOOK
 #define TEX_HOOK(tpage, clut)
 #endif
@@ -332,6 +335,7 @@ static inline void put_flat(u16* dst, int r8, int g8, int b8, int semi,
 }
 
 int soft_tg_log[24][7], soft_tg_logn; /* first textured gouraud triangles of a window (perf log) */
+unsigned soft_col_sprites; /* narrow quads drawn by columns (perf log) */
 unsigned soft_tg_rd, soft_tg_rd2; /* texture halfword reads in span_tg4 (rows fixed / not), perf log */
 
 // Span inner loops for the textured triangle paths, one function per texel
@@ -1485,6 +1489,47 @@ SOFT_RASTER_IRAM static void raster_line(const SV* a, const SV* b, int semi) {
     }
 }
 
+// Axis-aligned quad one or two pixels wide whose texture is stretched only
+// vertically (the Game Over melt: 256 strips of 1 x up to 240, each a
+// different height every frame). As two triangles every one of its rows
+// paid the full edge setup for a pixel or two; here a column loop steps v
+// per row. Covers [x0, x1) x [y0, y2) like the triangles (top-left rule).
+// (flash: it only runs during the melt)
+static void raster_strip(const SV* v, u16 tpage, u16 clut, int semi) {
+    soft_col_sprites++;
+    int x0 = v[0].x + st.ox, x1 = v[1].x + st.ox, y0 = v[0].y + st.oy, y2 = v[2].y + st.oy;
+    Tex t = tex_from(tpage, clut);
+    int32_t du = ((v[1].u - v[0].u) << 16) / (x1 - x0);
+    int32_t dv = ((v[2].v - v[0].v) << 16) / (y2 - y0);
+    int xa = x0 < st.x0 ? st.x0 : x0, xb = x1 - 1 > st.x1 ? st.x1 : x1 - 1;
+    int ya = y0 < st.y0 ? st.y0 : y0, yb = y2 - 1 > st.y1 ? st.y1 : y2 - 1;
+    if (xa > xb || ya > yb) return;
+    int neutral = v->r == 0x80 && v->g == 0x80 && v->b == 0x80;
+    int r8 = v->r, g8 = v->g, b8 = v->b;
+    if (ya < yb && !ROW_MINE(ya)) ya++;
+    int jstep = soft_par < 0 ? 1 : 2;
+    const int dstride = DROW_STRIDE() * jstep;
+    for (int x = xa; x <= xb; x++) {
+        int u = ((v[0].u << 16) + (x - x0) * du) >> 16 & 0xFF;
+        int32_t vi = (v[0].v << 16) + (ya - y0) * dv;
+        if (!ROW_MINE(ya)) continue;
+        u16* dst = DROW(ya) + x;
+        for (int y = ya; y <= yb; y += jstep, dst += dstride, vi += dv * jstep) {
+            const u16* trow = t.page + ((vi >> 16) & 0xFF) * VRAM_PITCH;
+            u16 texel;
+            if (t.bpp == 0) texel = t.clut[(TEX_RD(&trow[u >> 2]) >> ((u & 3) * 4)) & 0xF];
+            else if (t.bpp == 1) texel = t.clut[(TEX_RD(&trow[u >> 1]) >> ((u & 1) * 8)) & 0xFF];
+            else texel = TEX_RD(&trow[u]);
+            if (!texel) continue;
+            u16 m = neutral ? (u16)(texel & 0x7FFF)
+                            : (u16)(mod5(texel & 0x1F, r8) | (mod5((texel >> 5) & 0x1F, g8) << 5) |
+                                    (mod5((texel >> 10) & 0x1F, b8) << 10));
+            if (semi && (texel & 0x8000)) *dst = blend555(*dst, m, t.abr);
+            else *dst = (u16)(m | (texel & 0x8000));
+        }
+    }
+}
+
 // ---- VRAM block operations -------------------------------------------------
 
 // A corrupt packet must degrade to a bounded no-op, not a multi-second (or
@@ -1648,6 +1693,17 @@ static int soft_push_prim(u_long* packets, int max_len) {
             for (int i = 0; i < n; i++) {
                 v[i].r = v[i].g = v[i].b = 0x80;
             }
+        }
+        if (n == 4 && isTextured && v[0].y == v[1].y && v[2].y == v[3].y &&
+            v[0].x == v[2].x && v[1].x == v[3].x && v[0].u == v[2].u &&
+            v[1].u == v[3].u && v[0].v == v[1].v && v[2].v == v[3].v &&
+            v[1].x > v[0].x && v[1].x - v[0].x <= 2 && v[2].y > v[0].y &&
+            (!isGouraud ||
+             (v[1].r == v[0].r && v[1].g == v[0].g && v[1].b == v[0].b &&
+              v[2].r == v[0].r && v[2].g == v[0].g && v[2].b == v[0].b &&
+              v[3].r == v[0].r && v[3].g == v[0].g && v[3].b == v[0].b))) {
+            raster_strip(v, tpage, clut, isSemi);
+            return max_len - len;
         }
         // Axis-aligned textured quad with 1:1 texel mapping and one colour
         // (stage name banner, dissolve strips, HUD panels): identical output

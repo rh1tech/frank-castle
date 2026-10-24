@@ -98,6 +98,11 @@ static inline u16 *drow(int y) {
     return draw_cur_c[c] >= 0 ? draw_origin_c[c] + y * draw_sw_c[c] : g_PsxVram + y * VRAM_PITCH;
 }
 #define DROW(y) drow(y)
+static inline int drow_stride(void) {
+    int c = get_core_num();
+    return draw_cur_c[c] >= 0 ? draw_sw_c[c] : VRAM_PITCH;
+}
+#define DROW_STRIDE() drow_stride()
 
 /* core 0 helping (see gpu_help): wait until it has drawn everything core 1
  * published, before core 1 changes slots or VRAM under it */
@@ -389,7 +394,7 @@ extern void Video_TexWait(void);
 static const u16 *clut_old_for(u16 id, const u16 *src, int n);
 #define SOFT_CLUT_SIDE clut_old_for
 /* big 4bpp triangles read their texture from an SRAM copy (per core) */
-#define SOFT_TEX_SRAM_BYTES 4096
+#define SOFT_TEX_SRAM_BYTES 3584
 #define SOFT_RASTER_IRAM __attribute__((section(".time_critical.raster"), noinline))
 #include "soft_raster.inc.c"
 
