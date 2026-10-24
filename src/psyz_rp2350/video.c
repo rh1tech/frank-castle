@@ -620,6 +620,12 @@ static void frame_stats(uint64_t work_us) {
             PV("[perf] span_tg4 texture reads/frame: fixed row %u, varying %u\n", soft_tg_rd / stat_frames,
                soft_tg_rd2 / stat_frames);
             soft_tg_rd = soft_tg_rd2 = 0;
+            extern volatile int soft_fx_reduce;
+            extern volatile unsigned soft_fx_prims;
+            extern int Platform_GetFxMode(void);
+            PV("[perf] effects: mode %d, reduced now %d, %u primitives/frame drawn reduced\n", Platform_GetFxMode(),
+               soft_fx_reduce, soft_fx_prims / stat_frames);
+            soft_fx_prims = 0;
             extern volatile uint32_t gpu_psram_prims;
             extern volatile int16_t gpu_psram_area[4];
             PV("[perf] primitives drawn into PSRAM: %lu/frame, last area %d,%d..%d,%d\n",
@@ -703,6 +709,41 @@ static void frame_stats(uint64_t work_us) {
     }
 }
 
+/* ---- reduced effects ----------------------------------------------------
+ * Big semi-transparent primitives can draw half their rows (soft_raster:
+ * soft_fx_reduce). Mode 0 never, 2 always, 1 (default) only where the game
+ * runs late: about three late frames in a row turn it on, three seconds
+ * with plenty of slack turn it off. For a settings menu: Platform_SetFxMode
+ * / Platform_GetFxMode. */
+static volatile int castle_fx_mode = 1;
+static int fx_late, fx_calm;
+void Platform_SetFxMode(int mode) { castle_fx_mode = mode < 0 ? 0 : mode > 2 ? 2 : mode; }
+int Platform_GetFxMode(void) { return castle_fx_mode; }
+
+/* VSync, game core: work_us is how long the frame took before it waited */
+static void fx_frame(uint32_t work_us) {
+    extern volatile int soft_fx_reduce, soft_fx_phase;
+    soft_fx_phase ^= 1; /* the halves alternate */
+    if (castle_fx_mode != 1) {
+        soft_fx_reduce = castle_fx_mode == 2;
+        fx_late = fx_calm = 0;
+        return;
+    }
+    if (!soft_fx_reduce) {
+        fx_late = work_us > 16600 ? fx_late + 10 : fx_late > 0 ? fx_late - 1 : 0;
+        if (fx_late >= 25) {
+            soft_fx_reduce = 1;
+            fx_late = fx_calm = 0;
+        }
+    } else {
+        fx_calm = work_us < 13000 ? fx_calm + 1 : 0;
+        if (fx_calm >= 180) {
+            soft_fx_reduce = 0;
+            fx_calm = 0;
+        }
+    }
+}
+
 int Psyz_VideoVSync(int mode) {
     if (mode < 0) return (int)vblank_count;
     /* horizontal lines since the last vsync, 63.5 us each (NTSC) */
@@ -710,6 +751,7 @@ int Psyz_VideoVSync(int mode) {
     if (mode == 0) {
         vsync_entry_us = time_us_64();
         vsync_entry_at_us += time_us_32() - psxv_vsync_ret_us;
+        fx_frame((uint32_t)(vsync_entry_us - last_vsync_us));
         vsync_calls++;
         if ((time_us_64() - last_vsync_us) > 16600) {
             extern volatile uint32_t gpu_last_sync_at, gpu_last_drain_at;

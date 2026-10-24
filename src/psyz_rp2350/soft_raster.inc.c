@@ -109,7 +109,25 @@ static SoftState soft_st[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = {0, 0, VRAM_W -
 // cores sharing every primitive row by row, see gpu_fast.c's push_band).
 static int soft_par_c[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = -1};
 #define soft_par (soft_par_c[SOFT_CORE_ID()])
-#define ROW_MINE(y) (soft_par < 0 || ((y) & 1) == soft_par)
+// Reduced effects (soft_fx_reduce, set by the platform per frame): a big
+// semi-transparent primitive draws only half its rows, in pairs that
+// alternate between frames (soft_fx_phase). The light and shadow effects
+// stay, at half the cost. soft_skip: -1 draw every row, else the pair
+// parity skipped by the primitive being drawn.
+volatile int soft_fx_reduce, soft_fx_phase;
+volatile unsigned soft_fx_prims; // perf log: primitives drawn reduced
+#define SOFT_FX_MIN_AREA 4096
+static int soft_skip_c[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = -1};
+#define soft_skip (soft_skip_c[SOFT_CORE_ID()])
+static inline void soft_fx_begin(int semi, int area) {
+    int k = -1;
+    if (semi && soft_fx_reduce && area >= SOFT_FX_MIN_AREA) {
+        k = soft_fx_phase;
+        soft_fx_prims++;
+    }
+    soft_skip = k;
+}
+#define ROW_MINE(y) ((soft_par < 0 || ((y) & 1) == soft_par) && (soft_skip < 0 || (((y) >> 1) & 1) != soft_skip))
 
 // One vertex after packet parsing. Colors stay 8-bit until the pixel write.
 typedef struct {
@@ -365,7 +383,7 @@ typedef struct {
     volatile int valid;
     int credit; // hits earn it, misses spend it: a used block is not evicted
 } TexBlk;
-#define TEXBLK_N 2 // per core (light through glass samples two textures)
+#define TEXBLK_N 3 // per core (the chapel samples three regions of one page)
 static TexBlk texblk_c[SOFT_NCORE][TEXBLK_N];
 // the last box that missed, per core: a box is copied only when it misses
 // twice in a row (a texture used once costs more to copy than to read)
@@ -776,6 +794,7 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
     if (i0 > i1 || j0 > j1) {
         return;
     }
+    soft_fx_begin(semi, (i1 - i0 + 1) * (j1 - j0 + 1));
     if (semi && (i1 - i0 + 1) * (j1 - j0 + 1) >= 4096 && soft_semi_logged < 6) {
         soft_semi_log[soft_semi_logged][0] = t.bpp;
         soft_semi_log[soft_semi_logged][1] = i1 - i0 + 1;
@@ -829,7 +848,7 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
     // row fetched while this one is drawn, instead of a cache miss per four
     // or eight texels. Rows that wrap around the texture page take the
     // normal path.
-    if (!tile && (t.bpp == 1 || t.bpp == 2) && v->u + i1 <= 255 && i1 - i0 >= 31) {
+    if (!tile && (t.bpp == 1 || t.bpp == 2) && v->u + i1 <= 255 && i1 - i0 >= 31 && soft_skip < 0) {
         static u16 rbuf[2][260] __attribute__((aligned(4))) SOFT_SCRATCH;
         int u0 = v->u + i0, u1 = v->u + i1, uoff, words;
         if (t.bpp == 2) {
@@ -909,6 +928,7 @@ SOFT_RASTER_IRAM static void raster_tile(const SV* v, int w, int h, int semi, in
          * negative (a tile just right of the area landed in the margins) */
         return;
     }
+    soft_fx_begin(semi, (xb - xa + 1) * (yb - ya + 1));
 
     /* Opaque fill: nothing to read, nothing to interpolate, one colour for
      * every pixel -- so the general per-pixel path is all overhead. It matters
@@ -1070,6 +1090,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
     if (minx > maxx || miny > maxy) {
         return;
     }
+    soft_fx_begin(semi, (maxx - minx + 1) * (maxy - miny + 1));
 
     // edge setup: E(x,y) >= 0 inside, top-left edges get the <0 bias on the
     // others so shared edges paint exactly once
@@ -1459,6 +1480,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
 
 // Gouraud line, Bresenham over the major axis.
 SOFT_RASTER_IRAM static void raster_line(const SV* a, const SV* b, int semi) {
+    soft_skip = -1;
     int x0 = a->x + st.ox, y0 = a->y + st.oy;
     int x1 = b->x + st.ox, y1 = b->y + st.oy;
     int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
@@ -1498,6 +1520,7 @@ SOFT_RASTER_IRAM static void raster_line(const SV* a, const SV* b, int semi) {
 // per row. Covers [x0, x1) x [y0, y2) like the triangles (top-left rule).
 // (flash: it only runs during the melt)
 static void raster_strip(const SV* v, u16 tpage, u16 clut, int semi) {
+    soft_skip = -1; // steps two rows at a time: never reduced
     soft_col_sprites++;
     int x0 = v[0].x + st.ox, x1 = v[1].x + st.ox, y0 = v[0].y + st.oy, y2 = v[2].y + st.oy;
     Tex t = tex_from(tpage, clut);
