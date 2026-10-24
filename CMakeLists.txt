@@ -259,6 +259,9 @@ if(NOT CASTLE_PROFILE STREQUAL "0" AND NOT CASTLE_PROFILE STREQUAL "OFF")
 endif()
 set(CASTLE_ARGS "" CACHE STRING "Default extra game arguments, e.g. --stage nz0 (/castle/args.txt overrides)")
 target_compile_definitions(frank-castle PRIVATE ${SOTN_DEFINES} CASTLE_ARGS="${CASTLE_ARGS}")
+# SRAM's heap is small: a failed malloc must return NULL so castle_malloc
+# falls back to the PSRAM heap (the SDK's default is to panic)
+target_compile_definitions(frank-castle PRIVATE PICO_MALLOC_PANIC=0)
 target_compile_options(frank-castle PRIVATE -fno-short-enums -funsigned-char
     $<$<COMPILE_LANGUAGE:C>:-Wno-incompatible-pointer-types>)
 target_link_libraries(frank-castle castle_platform hardware_dma hardware_xip_cache pico_multicore pico_sync)
