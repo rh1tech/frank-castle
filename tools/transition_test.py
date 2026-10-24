@@ -16,6 +16,12 @@ from castle_cmd import Castle, grab, PAD_LEFT, PAD_RIGHT  # noqa: E402
 STAGES = ("st0 no3 np3 nz0 nz1 no0 no1 no2 no4 lib dai are top cat chi cen dre "
           "rno0 rno1 rno2 rno3 rno4 rnz0 rnz1 rlib rdai rare rtop rcat rchi rcen").split()
 
+# (stage, room, loading room) pairs that are walled off on the room's side:
+# the loading room is shared with another room that does reach it, or (no4
+# / rno4 37, the false save room) only an event opens the way to DRE
+KNOWN_BLOCKED = {("no0", 15, 36), ("no1", 13, 20), ("no4", 37, 39), ("cen", 1, 4),
+                 ("rno0", 15, 35), ("rno1", 13, 21), ("rno4", 37, 40), ("rcen", 1, 3)}
+
 
 def exits(rooms):
     """(room, loading room, direction) for doorways reachable by walking"""
@@ -49,12 +55,17 @@ def main():
     c = Castle()
     s = c.stat()
     if not s or s.get("state") != 2:
-        c.boot(stages[0])
+        c.boot("no3")
     c.cmd("god 1")
     log = open(out, "a")
     for st in stages:
-        c.go(st, 0)
+        if not c.go(st, 0):
+            c.boot(st)
+            c.cmd("god 1")
         rooms = c.rooms()
+        if not rooms:
+            print("%-5s: no rooms (stage did not load)" % st, flush=True)
+            continue
         for r, lr, d in exits(rooms):
             if (st, r[0], lr[0]) in done:
                 continue
@@ -66,18 +77,26 @@ def main():
             time.sleep(3.5)
             before = c.stat()
             c.pad(PAD_RIGHT if d == "right" else PAD_LEFT, 150)
-            time.sleep(3)
-            after = c.stat()
+            end = time.time() + 15
+            while True:  # the next stage loads, then plays
+                time.sleep(1)
+                after = c.stat()
+                if time.time() > end or (after and after.get("stage") != st
+                                         and after.get("step") == 3):
+                    break
             rec = {"stage": st, "room": r[0], "loading_room": lr[0], "dir": d, "before": before,
                    "after": after, "problems": c.problems(m)}
             rec["changed"] = bool(after and after.get("stage") != st)
+            rec["known_blocked"] = (st, r[0], lr[0]) in KNOWN_BLOCKED
             if not rec["changed"]:
                 rec["shot"] = grab(os.path.join(shots, "%s_%02d_%02d.png" % (st, r[0], lr[0])))
             log.write(json.dumps(rec) + "\n")
             log.flush()
-            print("%-5s room %2d -> loading %2d (%s): %s" % (
+            print("%-5s room %2d -> loading %2d (%s): %s%s" % (
                 st, r[0], lr[0], d,
-                "%s:%s" % (after.get("stage"), after.get("room")) if after else "?"), flush=True)
+                "%s:%s" % (after.get("stage"), after.get("room")) if after else "?",
+                "" if rec["changed"] else
+                " (known blocked)" if rec["known_blocked"] else " FAIL"), flush=True)
             if rec["problems"]:
                 print("   PROBLEMS", rec["problems"])
                 c.boot(st)
