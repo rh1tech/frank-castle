@@ -341,6 +341,7 @@ static void draw_into(int i) {
     draw_origin_c[c] = s->base - s->y0 * s->sw - s->x0;
 }
 
+volatile uint16_t tex_flush_log[6]; /* perf log: the last texture flush */
 /* Before sampling texels/CLUT that live in a slot, publish it to PSRAM. */
 static void tex_hook(u16 tpage, u16 clut) {
     int bpp = (tpage >> 7) & 3;
@@ -349,7 +350,11 @@ static void tex_hook(u16 tpage, u16 clut) {
     for (int i = 0; i < NSLOT; i++)
         if (slot[i].dirty && (overlaps(&slot[i], px, py, pw, 256) ||
                               overlaps(&slot[i], (clut & 0x3F) * 16, (clut >> 6) & 0x1FF, 256, 1)))
+        {
+            tex_flush_log[0] = tpage, tex_flush_log[1] = clut, tex_flush_log[2] = (uint16_t)slot[i].x0;
+            tex_flush_log[3] = (uint16_t)slot[i].y0, tex_flush_log[4] = (uint16_t)slot[i].w, tex_flush_log[5] = (uint16_t)slot[i].h;
             slot_flush_c(&slot[i], CAUSE_TEX);
+        }
 }
 /* core 1 publishes slots before core 0 may sample them (gpu_help) */
 #define TEX_HOOK(tpage, clut) (get_core_num() == 1 ? tex_hook(tpage, clut) : (void)0)
@@ -377,7 +382,7 @@ extern void Video_TexWait(void);
 static const u16 *clut_old_for(u16 id, const u16 *src, int n);
 #define SOFT_CLUT_SIDE clut_old_for
 /* big 4bpp triangles read their texture from an SRAM copy (per core) */
-#define SOFT_TEX_SRAM_BYTES 4608
+#define SOFT_TEX_SRAM_BYTES 4096
 #define SOFT_RASTER_IRAM __attribute__((section(".time_critical.raster"), noinline))
 #include "soft_raster.inc.c"
 
@@ -987,6 +992,8 @@ static void gpu_help(void) {
 
 /* poly flat, poly tex, poly tex+gouraud, line, sprite, tile; +6 semi */
 volatile uint32_t gpu_class_us[12], gpu_class_n[12], gpu_class_px[12];
+volatile uint32_t gpu_psram_prims; /* perf log: primitives drawn straight into PSRAM, and the last area */
+volatile int16_t gpu_psram_area[4];
 static void exec_prim(u_long *packets, int len) {
     uint64_t t = time_us_64();
     gpu_c1_state = 1;
@@ -997,7 +1004,12 @@ static void exec_prim(u_long *packets, int len) {
     }
     draw_into(i);
     push_band(packets, len, help_on ? 0 : -1);
-    if (i < 0) vrow_forget(st.x0, st.y0, st.x1 - st.x0 + 1, st.y1 - st.y0 + 1); /* drew into PSRAM */
+    if (i < 0) { /* drew into PSRAM */
+        vrow_forget(st.x0, st.y0, st.x1 - st.x0 + 1, st.y1 - st.y0 + 1);
+        gpu_psram_prims++;
+        gpu_psram_area[0] = (int16_t)st.x0, gpu_psram_area[1] = (int16_t)st.y0;
+        gpu_psram_area[2] = (int16_t)st.x1, gpu_psram_area[3] = (int16_t)st.y1;
+    }
     uint32_t dt = (uint32_t)(time_us_64() - t);
     gpu_prim_us += dt;
     frame_raster_us += dt;

@@ -618,6 +618,15 @@ static void frame_stats(uint64_t work_us) {
             PV("[perf] span_tg4 texture reads/frame: fixed row %u, varying %u\n", soft_tg_rd / stat_frames,
                soft_tg_rd2 / stat_frames);
             soft_tg_rd = soft_tg_rd2 = 0;
+            extern volatile uint32_t gpu_psram_prims;
+            extern volatile int16_t gpu_psram_area[4];
+            PV("[perf] primitives drawn into PSRAM: %lu/frame, last area %d,%d..%d,%d\n",
+               (unsigned long)(gpu_psram_prims / stat_frames), gpu_psram_area[0], gpu_psram_area[1],
+               gpu_psram_area[2], gpu_psram_area[3]);
+            gpu_psram_prims = 0;
+            extern volatile uint16_t tex_flush_log[6];
+            PV("[perf] last texture flush: tpage %x clut %x slot %d,%d %dx%d\n", tex_flush_log[0], tex_flush_log[1],
+               tex_flush_log[2], tex_flush_log[3], tex_flush_log[4], tex_flush_log[5]);
             extern unsigned soft_tex_copies;
             PV("[perf] texture copies to SRAM: %u/frame\n", soft_tex_copies / stat_frames);
             soft_tex_copies = 0;

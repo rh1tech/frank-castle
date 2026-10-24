@@ -353,64 +353,86 @@ typedef struct {
 // A big 4bpp triangle samples its texture from a copy in internal SRAM: a
 // texel read from PSRAM costs ~60 ns even when the XIP cache hits, and
 // scenery reuses one small texture across many triangles (lava: ~15k reads
-// a frame from 4 KB). One block per core, the bounding box of the
-// triangle's texels, or of this one and the last if both fit. Any VRAM
+// a frame from 4 KB). Two blocks per core, each the bounding box of a
+// triangle's texels, or of it and an earlier one if both fit. Any VRAM
 // write over a block drops it (soft_tex_forget).
 typedef struct {
     int x0, y0, w, h; // VRAM halfword rectangle copied
     volatile int valid;
     int credit; // hits earn it, misses spend it: a used block is not evicted
 } TexBlk;
-static TexBlk texblk_c[SOFT_NCORE];
-static u16 texblk_buf_c[SOFT_NCORE][SOFT_TEX_SRAM_BYTES / 2] __attribute__((aligned(4)));
+#define TEXBLK_N 2 // per core (light through glass samples two textures)
+static TexBlk texblk_c[SOFT_NCORE][TEXBLK_N];
+static u16 texblk_buf_c[SOFT_NCORE][TEXBLK_N][SOFT_TEX_SRAM_BYTES / 2] __attribute__((aligned(4)));
 unsigned soft_tex_copies; // perf log
 
 static void soft_tex_forget(int x, int y, int w, int h) {
-    for (int c = 0; c < SOFT_NCORE; c++) {
-        TexBlk* b = &texblk_c[c];
-        if (b->valid && x < b->x0 + b->w && x + w > b->x0 && y < b->y0 + b->h && y + h > b->y0)
-            b->valid = 0;
-    }
+    for (int c = 0; c < SOFT_NCORE; c++)
+        for (int k = 0; k < TEXBLK_N; k++) {
+            TexBlk* b = &texblk_c[c][k];
+            if (b->valid && x < b->x0 + b->w && x + w > b->x0 && y < b->y0 + b->h && y + h > b->y0)
+                b->valid = 0;
+        }
 }
 
 // page origin for texels u0..u1, v0..v1 of the 4bpp page at (tpx, tpy), so
 // that page[v * *pitch + (u >> 2)] reads the copy; NULL: use VRAM
 static const u16* soft_tex_sram(int tpx, int tpy, int u0, int v0, int u1, int v1, int* pitch) {
-    TexBlk* b = &texblk_c[SOFT_CORE_ID()];
+    TexBlk* blk = texblk_c[SOFT_CORE_ID()];
     // a texel of margin: interpolated coordinates can round one past a vertex
     int x0 = tpx + ((u0 > 0 ? u0 - 1 : 0) >> 2), x1 = tpx + ((u1 < 255 ? u1 + 1 : 255) >> 2);
     int y0 = tpy + (v0 > 0 ? v0 - 1 : 0), y1 = tpy + (v1 < 255 ? v1 + 1 : 255);
-    if (b->valid && x0 >= b->x0 && x1 < b->x0 + b->w && y0 >= b->y0 && y1 < b->y0 + b->h) {
-        if (b->credit < 64) b->credit += 2;
-    } else {
-        if (b->valid && b->credit > 0) { // in use: this triangle reads VRAM
-            b->credit--;
-            return NULL;
+    int k;
+    for (k = 0; k < TEXBLK_N; k++) {
+        TexBlk* b = &blk[k];
+        if (b->valid && x0 >= b->x0 && x1 < b->x0 + b->w && y0 >= b->y0 && y1 < b->y0 + b->h) {
+            if (b->credit < 64) b->credit += 2;
+            break;
         }
-        if (b->valid) { // cover the last block too if the union fits
+    }
+    if (k == TEXBLK_N) {
+        // a block whose union with this box fits, else the one with the least credit
+        int victim = -1;
+        for (int i = 0; i < TEXBLK_N && victim < 0; i++) {
+            TexBlk* b = &blk[i];
+            if (!b->valid) continue;
             int ux0 = x0 < b->x0 ? x0 : b->x0, uy0 = y0 < b->y0 ? y0 : b->y0;
             int ux1 = x1 > b->x0 + b->w - 1 ? x1 : b->x0 + b->w - 1;
             int uy1 = y1 > b->y0 + b->h - 1 ? y1 : b->y0 + b->h - 1;
-            if ((ux1 - ux0 + 1) * (uy1 - uy0 + 1) * 2 <= SOFT_TEX_SRAM_BYTES)
+            if ((ux1 - ux0 + 1) * (uy1 - uy0 + 1) * 2 <= SOFT_TEX_SRAM_BYTES) {
+                victim = i;
                 x0 = ux0, y0 = uy0, x1 = ux1, y1 = uy1;
+            }
+        }
+        if (victim < 0) {
+            for (int i = 0; i < TEXBLK_N; i++)
+                if (victim < 0 || !blk[i].valid || (blk[victim].valid && blk[i].credit < blk[victim].credit))
+                    victim = i;
+            if (blk[victim].valid && blk[victim].credit > 0) { // in use: this one reads VRAM
+                blk[victim].credit--;
+                return NULL;
+            }
         }
         int w = x1 - x0 + 1, h = y1 - y0 + 1;
         if (w * h * 2 > SOFT_TEX_SRAM_BYTES) {
             return NULL;
         }
+        TexBlk* b = &blk[victim];
         b->valid = 0;
-        u16* dst = texblk_buf_c[SOFT_CORE_ID()];
+        u16* dst = texblk_buf_c[SOFT_CORE_ID()][victim];
         for (int j = 0; j < h; j++) {
             const u16* src = vram + (y0 + j) * VRAM_PITCH + x0;
-            for (int k = 0; k < w; k++) dst[j * w + k] = src[k];
+            for (int i = 0; i < w; i++) dst[j * w + i] = src[i];
         }
         b->x0 = x0, b->y0 = y0, b->w = w, b->h = h;
         b->credit = 2;
         b->valid = 1;
         soft_tex_copies++;
+        k = victim;
     }
+    TexBlk* b = &blk[k];
     *pitch = b->w;
-    return texblk_buf_c[SOFT_CORE_ID()] - (b->y0 - tpy) * b->w - (b->x0 - tpx);
+    return texblk_buf_c[SOFT_CORE_ID()][k] - (b->y0 - tpy) * b->w - (b->x0 - tpx);
 }
 #endif
 
@@ -523,7 +545,7 @@ DEF_SPAN_TF(span_tf8, TEXEL8)
 DEF_SPAN_TF(span_tf15, TEXEL15)
 DEF_SPAN_TG(span_tg4_gen, TEXEL4)
 
-// Opaque 4bpp textured gouraud (lava, lit scenery): the generic loop carried
+// 4bpp textured gouraud (lava, lit scenery, light through glass): the generic loop carried
 // three 16.16 colour accumulators plus their steps and spilled to the stack
 // on every pixel. Red and blue go into one register as two 8.8 lanes stepped
 // together (UADD16: no carry between lanes), green alone; the texel row is
@@ -534,10 +556,7 @@ DEF_SPAN_TG(span_tg4_gen, TEXEL4)
 SOFT_RASTER_IRAM static void span_tg4(u16* dst, int n, int32_t ui, int32_t vi,
                                       int32_t ri, int32_t gi, int32_t bi,
                                       const SpanCtx* c) {
-    if (c->semi) {
-        span_tg4_gen(dst, n, ui, vi, ri, gi, bi, c);
-        return;
-    }
+    const int semi = c->semi, abr = c->abr; // semi: only texels with STP blend
     const u16* clut = c->clut;
     const int32_t udx = c->udx;
     uint32_t rb = (((uint32_t)ri >> 8) & 0xFFFF) | (((uint32_t)bi << 8) & 0xFFFF0000u);
@@ -560,7 +579,9 @@ SOFT_RASTER_IRAM static void span_tg4(u16* dst, int n, int32_t ui, int32_t vi,
             uint32_t r = __usat((int32_t)(((texel & 0x1F) * ((rb >> 8) & 0xFF)) >> 7), 5);
             uint32_t g = __usat((int32_t)((((texel >> 5) & 0x1F) * ((uint32_t)gi >> 16 & 0xFF)) >> 7), 5);
             uint32_t b = __usat((int32_t)((((texel >> 10) & 0x1F) * (rb >> 24)) >> 7), 5);
-            *dst = (u16)(r | (g << 5) | (b << 10) | (texel & 0x8000));
+            uint32_t m = r | (g << 5) | (b << 10);
+            if (semi && (texel & 0x8000)) *dst = blend555(*dst, (u16)m, abr);
+            else *dst = (u16)(m | (texel & 0x8000));
         }
         return;
     }
@@ -581,7 +602,9 @@ SOFT_RASTER_IRAM static void span_tg4(u16* dst, int n, int32_t ui, int32_t vi,
         uint32_t r = __usat((int32_t)(((texel & 0x1F) * ((rb >> 8) & 0xFF)) >> 7), 5);
         uint32_t g = __usat((int32_t)((((texel >> 5) & 0x1F) * ((uint32_t)gi >> 16 & 0xFF)) >> 7), 5);
         uint32_t b = __usat((int32_t)((((texel >> 10) & 0x1F) * (rb >> 24)) >> 7), 5);
-        *dst = (u16)(r | (g << 5) | (b << 10) | (texel & 0x8000));
+        uint32_t m = r | (g << 5) | (b << 10);
+        if (semi && (texel & 0x8000)) *dst = blend555(*dst, (u16)m, abr);
+        else *dst = (u16)(m | (texel & 0x8000));
     }
 }
 #else
@@ -1170,6 +1193,77 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
                 *(u16*)p2 = SPAN_PIX();
             }
 #undef SPAN_PIX
+        }
+        return;
+    }
+
+    // Untextured semi-transparent (fades, darkening overlays, light): same
+    // spans as the opaque path above; each pixel blends a flat or stepped
+    // colour into what is there. Same arithmetic as put_flat.
+    if (!textured && semi) {
+        const int abr = (cur_tpage >> 5) & 3;
+        u16 tr[32], tg[32], tb[32];
+        int flat_ready = 0;
+        fx r0 = gouraud ? rrow : (fx)(a->r << 16);
+        fx g0 = gouraud ? grow : (fx)(a->g << 16);
+        fx b0 = gouraud ? brow : (fx)(a->b << 16);
+        fx frdx = gouraud ? rdx : 0, frdy = gouraud ? rdy : 0;
+        fx fgdx = gouraud ? gdx : 0, fgdy = gouraud ? gdy : 0;
+        fx fbdx = gouraud ? bdx : 0, fbdy = gouraud ? bdy : 0;
+        for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
+                 w2row += B2, r0 += frdy, g0 += fgdy, b0 += fbdy) {
+            if (!ROW_MINE(y)) continue;
+            int xl = minx, xr = maxx;
+            int we[3] = {w0row, w1row, w2row};
+            int Ae[3] = {A0, A1, A2};
+            int empty = 0;
+            for (int e = 0; e < 3; e++) {
+                int w = we[e], A = Ae[e];
+                if (A == 0) {
+                    if (w < 0) { empty = 1; break; }
+                } else if (A > 0) {
+                    if (w < 0) {
+                        int x = minx + (-w + A - 1) / A;
+                        if (x > xl) xl = x;
+                    }
+                } else {
+                    if (w < 0) { empty = 1; break; }
+                    int x = minx + w / (-A);
+                    if (x < xr) xr = x;
+                }
+            }
+            if (empty || xl > xr) {
+                continue;
+            }
+            u16* p = DROW(y) + xl;
+            u16* pe = p + (xr - xl + 1);
+            if (!gouraud) {
+                // a flat colour: each channel's result depends on that
+                // channel of the background alone (tables built once)
+                if (!flat_ready) {
+                    u16 c = (u16)((a->r >> 3) | ((a->g >> 3) << 5) | ((a->b >> 3) << 10));
+                    for (int k = 0; k < 32; k++) {
+                        u16 bl = blend555((u16)(k | (k << 5) | (k << 10)), c, abr);
+                        tr[k] = bl & 0x1F;
+                        tg[k] = bl & 0x3E0;
+                        tb[k] = bl & 0x7C00;
+                    }
+                    flat_ready = 1;
+                }
+                for (; p < pe; p++) {
+                    unsigned d = *p;
+                    *p = (u16)(tr[d & 0x1F] | tg[(d >> 5) & 0x1F] | tb[(d >> 10) & 0x1F]);
+                }
+                continue;
+            }
+            fx ri = r0 + (fx)(xl - minx) * frdx;
+            fx gi = g0 + (fx)(xl - minx) * fgdx;
+            fx bi = b0 + (fx)(xl - minx) * fbdx;
+            for (; p < pe; p++, ri += frdx, gi += fgdx, bi += fbdx) {
+                u16 c = (u16)((((unsigned)ri >> 19) & 0x1F) | ((((unsigned)gi >> 19) & 0x1F) << 5) |
+                              ((((unsigned)bi >> 19) & 0x1F) << 10));
+                *p = blend555(*p, c, abr);
+            }
         }
         return;
     }
