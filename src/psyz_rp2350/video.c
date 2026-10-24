@@ -68,6 +68,7 @@ static uint16_t line_buf[NBUF][PSXV_OUT_W] __attribute__((aligned(4)));
 static uint16_t black_line[PSXV_OUT_W] __attribute__((aligned(4)));
 static volatile uint32_t vblank_count;
 volatile uint32_t psxv_late_by[8];
+volatile uint32_t psxv_late_band[8]; /* late rows by 32-row band (perf log) */
 volatile int psxv_beam_row;    /* source row being shown, -1 in vblank */
 volatile int psxv_fill_row;    /* next source row the loop will copy */
 #define beam_row psxv_beam_row
@@ -205,6 +206,7 @@ static void __not_in_flash_func(on_line)(uint32_t out_line, psxv_line_t *line) {
         extern volatile uint8_t gpu_c1_state;
         psxv_late_rows++;
         psxv_late_by[gpu_c1_state & 7]++;
+        psxv_late_band[(row >> 5) & 7]++;
     }
     line->pixels = line_buf[row % NBUF];
 }
@@ -419,6 +421,13 @@ void __not_in_flash_func(Video_ScanFill)(void) {
     }
 }
 
+/* psyz's XA decoder, between sound groups: a whole sector is ~1 ms of
+ * work, longer than the ring's lead in the wide modes scanned from PSRAM.
+ * Core 1 mixes too, so keep the scanout fed from there. */
+void __not_in_flash_func(Psyz_AudioYield)(void) {
+    if (get_core_num() == 1 && fill_row <= beam_row + 10 && fill_row < 240) Video_ScanFill();
+}
+
 /* Core 1, between rows of a slot flush: the flush's back-to-back PSRAM
  * writes would starve the stream, so bring the ring fully up to date (and
  * wait for the row in flight) before every flush row. */
@@ -466,7 +475,10 @@ volatile uint32_t psxv_vsync_ret_us; /* time_us_32 when VSync last returned */
 static uint32_t vsync_entry_at_us, vsync_late, vsync_calls; /* timeline (perf log) */
 static uint64_t vsync_entry_us;
 static uint32_t wait_late, wait_late_vsync_us; /* reached the vblank wait after the vblank */
-static uint32_t late_log[8][14];
+static uint32_t late_log[8][19];
+/* vblank pacing (perf log): vblanks per frame 0/1/2/3+, frames whose vblank
+ * passed before the wait, time waiting and in Gpu_FlushHandOff */
+static uint32_t vb_hist[4], vb_passed_before_wait, vb_at_ret, vb_wait_us, vb_handoff_us;
 static uint32_t vram_at_ret, shadow_at_ret; /* gpu_vram_us/gpu_shadow_us at the last VSync return */ /* late frames: VSync entry, DrawSync return, core 1 drain, mixing us, SD sectors */
 
 
@@ -574,13 +586,28 @@ static void frame_stats(uint64_t work_us) {
                (unsigned long)(gq_first_sum / gpu_tl_frames), (unsigned long)(gq_last_sum / gpu_tl_frames),
                (unsigned long)(gq_full_us / gpu_tl_frames));
         gq_first_sum = gq_last_sum = gq_full_us = 0;
+        if (psxv_late_band[0] | psxv_late_band[1] | psxv_late_band[2] | psxv_late_band[3] | psxv_late_band[4] |
+            psxv_late_band[5] | psxv_late_band[6] | psxv_late_band[7]) {
+            printf("[perf] late rows by band of 32: %lu %lu %lu %lu %lu %lu %lu %lu\n",
+                   (unsigned long)psxv_late_band[0], (unsigned long)psxv_late_band[1], (unsigned long)psxv_late_band[2],
+                   (unsigned long)psxv_late_band[3], (unsigned long)psxv_late_band[4], (unsigned long)psxv_late_band[5],
+                   (unsigned long)psxv_late_band[6], (unsigned long)psxv_late_band[7]);
+            for (int k = 0; k < 8; k++) psxv_late_band[k] = 0;
+        }
+        PV("[perf] vblanks per frame 0/1/2/3+: %lu/%lu/%lu/%lu, vblank already passed at the wait %lu, wait %lu us/frame, hand-off %lu us/frame\n",
+           (unsigned long)vb_hist[0], (unsigned long)vb_hist[1], (unsigned long)vb_hist[2], (unsigned long)vb_hist[3],
+           (unsigned long)vb_passed_before_wait, (unsigned long)(vb_wait_us / stat_frames), (unsigned long)(vb_handoff_us / stat_frames));
+        for (int k = 0; k < 4; k++) vb_hist[k] = 0;
+        vb_passed_before_wait = vb_wait_us = vb_handoff_us = 0;
         for (uint32_t k = 0; k < vsync_late && k < 8; k++)
-            PV("[perf] late frame: VSync at %lu, DrawSync done %lu, core 1 drained %lu us, mixing %lu us, %lu SD sectors, raster %lu us, core-1 flush %lu us (%lu rows), vram ops %lu us, slot copies %lu us, slowest op kind %lu %lux%lu %lu us\n",
+            PV("[perf] late frame: VSync at %lu, DrawSync done %lu, core 1 drained %lu us, mixing %lu us, %lu SD sectors, raster %lu us, core-1 flush %lu us (%lu rows), vram ops %lu us, slot copies %lu us, slowest op kind %lu %lux%lu %lu us; DrawSync entered %lu, prefetch %lu, pre-help mix %lu, help %lu, late prefetch+idle mix %lu us\n",
                    (unsigned long)late_log[k][0], (unsigned long)late_log[k][1], (unsigned long)late_log[k][2],
                    (unsigned long)late_log[k][3], (unsigned long)late_log[k][4], (unsigned long)late_log[k][5],
                    (unsigned long)late_log[k][6], (unsigned long)late_log[k][7], (unsigned long)late_log[k][8],
                    (unsigned long)late_log[k][9], (unsigned long)late_log[k][10], (unsigned long)late_log[k][11],
-                   (unsigned long)late_log[k][12], (unsigned long)late_log[k][13]);
+                   (unsigned long)late_log[k][12], (unsigned long)late_log[k][13],
+                   (unsigned long)late_log[k][14], (unsigned long)late_log[k][15], (unsigned long)late_log[k][16],
+                   (unsigned long)late_log[k][17], (unsigned long)late_log[k][18]);
         if (wait_late)
             PV("[perf] %lu frames reached the vblank wait late, VSync work in them %lu us avg\n",
                    (unsigned long)wait_late, (unsigned long)(wait_late_vsync_us / wait_late));
@@ -773,6 +800,8 @@ int Psyz_VideoVSync(int mode) {
                 late_log[vsync_late][11] = big_op_w;
                 late_log[vsync_late][12] = big_op_h;
                 late_log[vsync_late][13] = big_op_us;
+                extern volatile uint32_t ds_phase_us[5];
+                for (int k = 0; k < 5; k++) late_log[vsync_late][14 + k] = ds_phase_us[k];
             }
             vsync_late++;
         }
@@ -803,6 +832,7 @@ int Psyz_VideoVSync(int mode) {
                 wait_late_vsync_us += (uint32_t)(time_us_64() - vsync_entry_us);
             }
         }
+        uint32_t vb_before_wait = vblank_count, t_wait = time_us_32();
         if (vsync_mode != PSYZ_VSYNC_LIMITLESS && vsync_mode != PSYZ_VSYNC_OFF) {
             /* wide modes: write the finished frame to PSRAM while waiting;
              * core 1 takes over whatever is left at the vblank */
@@ -811,8 +841,18 @@ int Psyz_VideoVSync(int mode) {
             while (vblank_count == now)
                 if (!Gpu_FlushStep()) tight_loop_contents();
         }
+        vb_wait_us += time_us_32() - t_wait;
+        uint32_t t_ho = time_us_32();
         extern void Gpu_FlushHandOff(void);
         Gpu_FlushHandOff();
+        vb_handoff_us += time_us_32() - t_ho;
+        {
+            /* vblanks this frame took: from the previous return to now */
+            uint32_t vb = vblank_count - vb_at_ret;
+            vb_hist[vb > 3 ? 3 : vb]++;
+            if (vb_before_wait != vb_at_ret) vb_passed_before_wait++;
+            vb_at_ret = vblank_count;
+        }
         last_vsync_us = time_us_64();
         psxv_vsync_ret_us = (uint32_t)last_vsync_us;
         extern void platform_usb_poll(void);
@@ -826,6 +866,8 @@ int Psyz_VideoVSync(int mode) {
             extern volatile uint32_t big_op_us;
             big_op_us = 0;
             shadow_at_ret = gpu_shadow_us;
+            extern volatile uint32_t ds_phase_us[5];
+            for (int k = 0; k < 5; k++) ds_phase_us[k] = 0;
         }
     }
     return lines;

@@ -1126,7 +1126,8 @@ static void exec_move(PS1_RECT *rect, int x, int y) {
 
 /* frame timeline (perf log): offsets from the last VSync return */
 volatile uint32_t gpu_sync_at_us, gpu_drain_at_us, gpu_tl_frames;
-volatile uint32_t gpu_last_sync_at, gpu_last_drain_at; /* this frame: DrawSync returned / core 1 drained */
+volatile uint32_t gpu_last_sync_at, gpu_last_drain_at;
+volatile uint32_t ds_phase_us[5]; /* this frame's DrawSync: entered at, prefetch, pre-help mix, help, rest (perf log) */ /* this frame: DrawSync returned / core 1 drained */
 static volatile uint32_t drain_last;
 extern volatile uint32_t psxv_vsync_ret_us;
 
@@ -1448,18 +1449,28 @@ int Draw_ExequeSync(void) {
     /* ...unless the read-ahead still holds two sectors (~100 ms of music):
      * then core 0 helps first and reads after, if the frame is still young */
     extern int Psyz_CdPrefetchLevel(void);
+    uint32_t tp = time_us_32();
+    ds_phase_us[0] = tp - psxv_vsync_ret_us;
     bool prefetch_later = Psyz_CdPrefetchLevel() >= 2;
     if (!prefetch_later && time_us_32() - psxv_vsync_ret_us < 9000) Psyz_CdPrefetch();
+    ds_phase_us[1] += time_us_32() - tp;
+    tp = time_us_32();
     /* the audio this frame needs first, while core 1 draws on its own */
     extern bool Audio_PreHelpFill(void);
     while (Audio_PreHelpFill()) {
     }
+    ds_phase_us[2] += time_us_32() - tp;
+    tp = time_us_32();
     gpu_help();
-    if (prefetch_later && time_us_32() - psxv_vsync_ret_us < 12000) Psyz_CdPrefetch();
+    ds_phase_us[3] += time_us_32() - tp;
+    tp = time_us_32();
+    /* a sector read takes a few ms: never start one past mid-frame */
+    if (prefetch_later && time_us_32() - psxv_vsync_ret_us < 9000) Psyz_CdPrefetch();
     /* light frames (core 1 already done) still top the audio up here: the
      * frame is young, and VSync's emergency top-up is the expensive place */
     while (time_us_32() - psxv_vsync_ret_us < 9000 && Audio_IdleFill()) {
     }
+    ds_phase_us[4] += time_us_32() - tp;
     gpu_fence_c(0);
     gpu_drain_at_us += drain_last;
     gpu_last_sync_at = time_us_32() - psxv_vsync_ret_us;

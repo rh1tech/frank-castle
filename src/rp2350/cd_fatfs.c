@@ -87,6 +87,24 @@ static void *fat_open(const char *path) {
 
 static uint32_t fat_read(void *handle, uint64_t offset, void *buf, uint32_t len) {
     handle_t *h = handle;
+    /* A 2352-byte CD sector straddles 512-byte blocks: read the whole
+     * aligned run with one multi-block command (FatFs would issue three,
+     * and each costs the card's access time, ~1 ms on some cards). */
+    uint64_t a0 = offset & ~(uint64_t)511, a1 = (offset + len + 511) & ~(uint64_t)511;
+    if (len < STAGING && a1 - a0 <= STAGING && a1 - a0 > len) {
+        if (a1 > f_size(&h->fil)) a1 = f_size(&h->fil);
+        UINT got = 0;
+        if (f_lseek(&h->fil, (FSIZE_t)a0) != FR_OK ||
+            f_read(&h->fil, staging, (UINT)(a1 - a0), &got) != FR_OK)
+            return 0;
+        uint32_t skip = (uint32_t)(offset - a0);
+        if (got <= skip) return 0;
+        uint32_t n = got - skip < len ? got - skip : len;
+        memcpy(buf, staging + skip, n);
+        /* leave the file where a plain read would */
+        f_lseek(&h->fil, (FSIZE_t)(offset + n));
+        return n;
+    }
     if (f_lseek(&h->fil, (FSIZE_t)offset) != FR_OK) return 0;
     if (in_sram(buf)) {
         UINT got = 0;
