@@ -40,6 +40,7 @@ volatile uint32_t audio_underruns;
 volatile uint32_t audio_chunk_max_us; /* worst mixing step (diagnostic) */
 volatile uint32_t audio_peak;         /* loudest sample mixed since the last perf log */
 volatile uint32_t audio_frame_us;     /* mixing time this frame (reset at VSync) */
+volatile uint32_t audio_mix_us[2], audio_mix_frames[2]; /* mixing time and frames by core (perf log) */
 static bool audio_running;
 
 /* ---- root counter ticks from core 1, replayed on core 0 ---- */
@@ -119,6 +120,8 @@ static bool fill_step_n(uint32_t target, uint32_t maxn) {
     if (n > target - level) n = target - level;
     Psyz_SpuPullSamples(buf, (int)n);
     audio_frame_us += time_us_32() - t0;
+    audio_mix_us[0] += time_us_32() - t0;
+    audio_mix_frames[0] += n;
     uint32_t wr = ring_wr;
     uint32_t peak = audio_peak;
     for (uint32_t i = 0; i < n; i++) {
@@ -159,6 +162,15 @@ bool Audio_PreHelpFill(void) { return Audio_FillStep(AUDIO_LOW + 1024); }
  * towards AUDIO_HIGH, so it is back for the next command soon. */
 bool Audio_HelpIdleFill(void) { return fill_step_n(AUDIO_HIGH, 64); }
 
+/* Core 1 with nothing to draw: one chunk towards AUDIO_HIGH, so core 0
+ * seldom has to mix before it helps rasterize. Music it needs comes from
+ * the read-ahead only (Psyz_CdReadAllowed). */
+bool __not_in_flash_func(Audio_Core1IdlePoll)(void) {
+    if (ring_wr - ring_rd >= AUDIO_HIGH) return false;
+    extern bool Audio_Core1Poll(void);
+    return Audio_Core1Poll();
+}
+
 /* Mix one chunk if the ring has room. Returns true if it did work. */
 bool __not_in_flash_func(Audio_Core1Poll)(void) {
     static short tmp[CHUNK * 2];
@@ -174,6 +186,8 @@ bool __not_in_flash_func(Audio_Core1Poll)(void) {
     Psyz_SpuPullSamples(tmp, CHUNK);
     uint32_t dt = time_us_32() - t0;
     if (dt > audio_chunk_max_us) audio_chunk_max_us = dt;
+    audio_mix_us[1] += dt;
+    audio_mix_frames[1] += CHUNK;
     uint32_t wr = ring_wr;
     for (int i = 0; i < CHUNK; i++)
         ring[(wr + i) & (RING_FRAMES - 1)] = (uint16_t)tmp[2 * i] | ((uint32_t)(uint16_t)tmp[2 * i + 1] << 16);

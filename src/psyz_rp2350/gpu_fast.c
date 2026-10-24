@@ -369,6 +369,10 @@ extern void Video_TexWait(void);
 #define SOFT_RASTER_STANDALONE
 #define SOFT_RASTER_NO_FALLBACK
 #define SOFT_CLUT_CACHE
+/* core 0 reads palettes from PSRAM, or from the old copy of a palette row
+ * core 1 has since overwritten (clut_old_for, below) */
+static const u16 *clut_old_for(u16 id, const u16 *src, int n);
+#define SOFT_CLUT_SIDE clut_old_for
 #define SOFT_RASTER_IRAM __attribute__((section(".time_critical.raster"), noinline))
 #include "soft_raster.inc.c"
 
@@ -484,25 +488,53 @@ static void load_image_fast(const PS1_RECT *r, const u16 *src) {
 /* ---- core 0 helps rasterize while it waits in DrawSync ----
  *
  * SOTN queues a whole frame early, then core 0 sits in DrawSync for most of
- * the frame while core 1 draws. While core 0 waits it takes the bottom half
- * of every draw area: core 1 runs each command as before but clips
- * primitives to the top half, then publishes the command; core 0 follows,
- * drawing the bottom halves with its own rasterizer state. Inside each half
- * primitives keep their order, and a semi-transparent pixel only reads its
- * own half, so the picture is the same. Anything that changes slots or VRAM
- * outside a primitive (slot allocation, load, flush; clears, moves,
- * uploads) first waits for core 0 to catch up (help_sync) and is done by
- * core 1 alone; an upload skips the wait when none of core 0's unfinished
- * commands touch its rectangle (fp_*). Core 1 mixes audio while it waits.
- * Core 0 only helps inside DrawSync, when nothing new is queued, so the
- * ring words it reads stay valid. The split line is not fixed at half:
- * it moves each frame towards the core that waited less. */
+ * the frame while core 1 draws. While core 0 waits it takes the odd rows of
+ * every primitive: core 1 runs each command as before but draws only even
+ * rows, then publishes the command; core 0 follows, drawing the odd rows
+ * with its own rasterizer state. Within each core primitives keep their
+ * order, and a semi-transparent pixel only reads itself, so the picture is
+ * the same.
+ *
+ * Anything that changes slots (allocation, load, flush) or moves VRAM first
+ * waits for core 0 to catch up (help_sync) and is done by core 1 alone. A
+ * clear or upload waits only for the last of core 0's unfinished commands
+ * that reads or draws the area (fp_*, slot_last); a palette row still in
+ * use is copied for core 0 instead (clut_old), and other writes still in
+ * use are handed to core 0, which does them in order (help_defer). Core 1
+ * mixes audio while it waits. Core 0 only helps inside DrawSync, when
+ * nothing new is queued, so the ring words it reads stay valid. */
 #define HELP_N 256
 /* ring position (low 13 bits, GQ_WORDS), type GQ_* (bits 13-16), target
  * slot + 1 (bits 17-19; 0: PSRAM) */
 typedef uint32_t HelpCmd;
 static HelpCmd help_q[HELP_N] __attribute__((section(".scratch_y.help")));
 static volatile uint32_t help_pub;  /* commands published by core 1 */
+static volatile uint32_t help_cur;  /* command core 0 is running */
+
+/* Palette rows overwritten while core 0 still had to draw commands that use
+ * them: core 1 keeps the old row here instead of waiting (palette cycling
+ * uploads a CLUT row every frame, right after the primitives using it). */
+#define CLUT_OLD_N 4
+typedef struct {
+    int16_t x, y, w;
+    uint32_t until; /* commands before this one see the old row */
+    u16 px[256];
+} ClutOld;
+static ClutOld clut_old[CLUT_OLD_N];
+static volatile uint32_t clut_old_used;
+volatile uint32_t clut_old_saves; /* perf log */
+
+static const u16 *clut_old_for(u16 id, const u16 *src, int n) {
+    uint32_t used = clut_old_used;
+    if (!used) return src;
+    int cx = (id & 0x3F) * 16, cy = (id >> 6) & 0x1FF;
+    for (; used; used &= used - 1) {
+        ClutOld *e = &clut_old[__builtin_ctz(used)];
+        if (cy == e->y && cx >= e->x && cx + n <= e->x + e->w && (int32_t)(help_cur - e->until) < 0)
+            return e->px + (cx - e->x);
+    }
+    return src;
+}
 static volatile uint32_t help_done; /* commands core 0 has finished */
 static volatile bool help_req;      /* core 0 is in DrawSync and can help */
 static volatile bool help_on;       /* split active (set by core 1, cleared by core 0) */
@@ -510,15 +542,15 @@ volatile uint32_t help_cmds, help_frames; /* diagnostic */
 /* perf log: core 1 waiting for core 0 (sync, full ring), core 0 drawing,
  * and when the split started (us after VSync returned) */
 volatile uint32_t help_wait_sync_us, help_wait_full_us, help_draw_us, help_start_us, help_idle_us;
-/* Where the draw area is split, in 64ths of its height from the top: what
- * core 1 keeps. Core 0 moves it after each frame towards the core that
- * waited less; core 1 latches it when the split starts. */
-volatile uint32_t help_split = 32;
-static volatile uint32_t help_split_cur = 32, help_c1_wait;
+/* the last of these is a lag: how long core 0 went on after core 1's last command */
+static volatile uint32_t help_c1_wait;
+static volatile uint32_t help_c1_last_us; /* when core 1 last published */
+volatile uint32_t help_lag_us;
 
 extern bool Audio_Core1Poll(void);
 /* perf log, by site: flush, slot load, slot alloc, clear, move, upload */
-volatile uint32_t help_sync_n[6], help_sync_us[6];
+/* the last: a primitive waiting for a write handed to core 0 */
+volatile uint32_t help_sync_n[7], help_sync_us[7];
 static void help_sync(int site) {
     if (!help_on || get_core_num() != 1) return;
     help_sync_n[site]++;
@@ -531,36 +563,83 @@ static void help_sync(int site) {
     help_c1_wait += time_us_32() - t;
 }
 
-/* half = 0: top half of the draw area, 1: bottom half, -1: all of it */
+/* half = 0: even rows (core 1), 1: odd rows (core 0), -1: all of them.
+ * Rows rather than halves: a frame's heavy primitives are often in one part
+ * of the screen (lava along the bottom), and every row has its own pixels,
+ * so either core's share is the same size wherever the work is. */
 static void push_band(u_long *packets, int len, int half) {
-    if (half < 0) {
-        soft_push_prim(packets, len);
-        return;
-    }
-    int y0 = st.y0, y1 = st.y1, mid = y0 + (int)(((uint32_t)(y1 - y0 + 1) * help_split_cur) >> 6);
-    if (half == 0) st.y1 = mid - 1;
-    else st.y0 = mid;
-    if (st.y0 <= st.y1) soft_push_prim(packets, len);
-    st.y0 = y0;
-    st.y1 = y1;
+    soft_par = half;
+    soft_push_prim(packets, len);
+    soft_par = -1;
 }
 
 /* What core 0's unfinished commands read or write in VRAM: texture and
  * CLUT rectangles and draw areas, kept by core 1 as it publishes and
  * forgotten whenever core 0 has caught up. An upload that misses all of
  * them need not wait for core 0. */
-#define FP_N 24
-static int16_t fp[FP_N][4]; /* x0, y0, x1, y1 inclusive */
+#define FP_N 128
+static int16_t fp[FP_N][4]; /* texture, CLUT and PSRAM draw rectangles: x0, y0, x1, y1 inclusive */
+static uint32_t fp_last[FP_N]; /* help_done value once its last user is drawn */
+static uint8_t fp_clut[FP_N];  /* a palette (core 0 can be given its old copy) */
 static int fp_n;
+
 volatile uint32_t help_upload_free; /* perf log: uploads that did not wait */
 
-static void fp_add(int x0, int y0, int x1, int y1) {
+/* Clears and uploads handed to core 0 (help_defer): their rectangle and
+ * command position. Done once help_done is past it. */
+#define PW_N 8
+static int16_t pw[PW_N][4];
+static uint32_t pw_idx[PW_N];
+static int pw_n;
+static bool pw_checking; /* fp_add measures against pw instead of recording */
+static uint32_t pw_need;
+volatile uint32_t help_deferred; /* perf log */
+
+static void pw_prune(void) {
+    int j = 0;
+    for (int i = 0; i < pw_n; i++)
+        if ((int32_t)(help_done - pw_idx[i]) <= 0) {
+            for (int k = 0; k < 4; k++) pw[j][k] = pw[i][k];
+            pw_idx[j++] = pw_idx[i];
+        }
+    pw_n = j;
+}
+
+/* help_done value once every handed-over write overlapping the box is done */
+static uint32_t pw_need_box(int x0, int y0, int x1, int y1) {
+    uint32_t need = 0;
+    for (int i = 0; i < pw_n; i++)
+        if (x0 <= pw[i][2] && x1 >= pw[i][0] && y0 <= pw[i][3] && y1 >= pw[i][1] &&
+            (int32_t)(pw_idx[i] + 1 - need) > 0)
+            need = pw_idx[i] + 1;
+    return need;
+}
+
+static void fp_add(int x0, int y0, int x1, int y1, int clut) {
+    if (pw_checking) {
+        uint32_t n = pw_need_box(x0, y0, x1, y1);
+        if ((int32_t)(n - pw_need) > 0) pw_need = n;
+        return;
+    }
     for (int i = 0; i < fp_n; i++)
-        if (fp[i][0] <= x0 && fp[i][1] <= y0 && fp[i][2] >= x1 && fp[i][3] >= y1) return;
+        if (fp[i][0] <= x0 && fp[i][1] <= y0 && fp[i][2] >= x1 && fp[i][3] >= y1 && fp_clut[i] == clut) {
+            fp_last[i] = help_pub + 1;
+            return;
+        }
     int i = fp_n;
-    if (fp_n < FP_N) fp_n++;
-    else { /* full: grow the last one */
-        i = FP_N - 1;
+    if (fp_n < FP_N) {
+        fp_n++;
+    } else { /* full: grow the rectangle that grows least (one giant
+              * rectangle would make every upload wait) */
+        int best = INT32_MAX;
+        for (int k = 0; k < FP_N; k++) {
+            if (fp_clut[k] != clut) continue;
+            int a0 = (fp[k][2] - fp[k][0] + 1) * (fp[k][3] - fp[k][1] + 1);
+            int nx0 = x0 < fp[k][0] ? x0 : fp[k][0], ny0 = y0 < fp[k][1] ? y0 : fp[k][1];
+            int nx1 = x1 > fp[k][2] ? x1 : fp[k][2], ny1 = y1 > fp[k][3] ? y1 : fp[k][3];
+            int g = (nx1 - nx0 + 1) * (ny1 - ny0 + 1) - a0;
+            if (g < best) best = g, i = k;
+        }
         if (x0 > fp[i][0]) x0 = fp[i][0];
         if (y0 > fp[i][1]) y0 = fp[i][1];
         if (x1 < fp[i][2]) x1 = fp[i][2];
@@ -570,13 +649,155 @@ static void fp_add(int x0, int y0, int x1, int y1) {
     fp[i][1] = (int16_t)y0;
     fp[i][2] = (int16_t)x1;
     fp[i][3] = (int16_t)y1;
+    fp_last[i] = help_pub + 1;
+    fp_clut[i] = (uint8_t)clut;
 }
 
-static bool fp_hits(const PS1_RECT *r) {
-    for (int i = 0; i < fp_n; i++)
-        if (r->x <= fp[i][2] && r->x + r->w - 1 >= fp[i][0] && r->y <= fp[i][3] && r->y + r->h - 1 >= fp[i][1])
-            return true;
+volatile int16_t fp_hit_log[4][8]; /* upload rect and the rect it hit (perf log) */
+volatile uint32_t fp_hit_n;
+/* how far core 0 must get (help_done) before r may be overwritten: the
+ * last unfinished command that reads or draws there; 0 if none does */
+static uint32_t fp_need(const PS1_RECT *r, bool *clut_only) {
+    uint32_t need = 0;
+    *clut_only = true; /* every pending hit is a one-row palette */
+    for (int i = 0; i < fp_n; i++) {
+        if (r->x <= fp[i][2] && r->x + r->w - 1 >= fp[i][0] && r->y <= fp[i][3] && r->y + r->h - 1 >= fp[i][1] &&
+            (int32_t)(fp_last[i] - help_done) > 0 && !fp_clut[i])
+            *clut_only = false;
+        if (r->x <= fp[i][2] && r->x + r->w - 1 >= fp[i][0] && r->y <= fp[i][3] && r->y + r->h - 1 >= fp[i][1] &&
+            fp_last[i] > need) {
+            need = fp_last[i];
+            volatile int16_t *l = fp_hit_log[fp_hit_n++ & 3];
+            l[0] = r->x; l[1] = r->y; l[2] = r->w; l[3] = r->h;
+            l[4] = fp[i][0]; l[5] = fp[i][1]; l[6] = fp[i][2]; l[7] = fp[i][3];
+        }
+    }
+    return need;
+}
+
+/* core 1, before uploading over a palette row core 0 still needs: keep the
+ * old row for core 0's commands before this one. False: no room, wait. */
+static bool clut_old_save(const PS1_RECT *r) {
+    if (r->h != 1 || r->w > 256 || r->w <= 0 || r->x < 0 || r->x + r->w > VRAM_W) return false;
+    for (int i = 0; i < NSLOT; i++)
+        if (overlaps(&slot[i], r->x, r->y, r->w, 1)) return false; /* row lives in SRAM */
+    for (int i = 0; i < CLUT_OLD_N; i++) {
+        ClutOld *e = &clut_old[i];
+        if ((clut_old_used & (1u << i)) && (int32_t)(help_done - e->until) < 0) continue;
+        clut_old_used &= ~(1u << i);
+        __dmb();
+        e->x = (int16_t)r->x;
+        e->y = (int16_t)r->y;
+        e->w = (int16_t)r->w;
+        e->until = help_pub; /* this upload's own position */
+        const u16 *row = g_PsxVram + (r->y & (VRAM_H - 1)) * VRAM_PITCH + r->x;
+        for (int k = 0; k < r->w; k++) e->px[k] = row[k];
+        __dmb();
+        clut_old_used |= 1u << i;
+        return true;
+    }
     return false;
+}
+
+/* core 1, before an upload or clear of r while core 0 helps: wait only
+ * until core 0 is past the last command that uses the area. A palette row
+ * still in use is copied for core 0 instead (palette cycling uploads a CLUT
+ * row every frame right after the primitives that use it). */
+static uint32_t slot_last[NSLOT]; /* help_done value once core 0's last primitive into the slot is drawn */
+volatile int16_t wait_log[4][8];
+volatile uint32_t wait_log_n;
+static int slot_c0_top[NSLOT];    /* highest row core 0 writes there: the top of its areas */
+
+/* core 1: spin (mixing audio) until core 0 is that far */
+static void help_wait_done(uint32_t need, int site) {
+    if ((int32_t)(need - help_done) <= 0) return;
+    help_sync_n[site]++;
+    uint32_t t0 = time_us_32();
+    while ((int32_t)(need - help_done) > 0)
+        if (!Audio_Core1Poll()) tight_loop_contents();
+    help_sync_us[site] += time_us_32() - t0;
+    help_wait_sync_us += time_us_32() - t0;
+    help_c1_wait += time_us_32() - t0;
+}
+
+/* core 1, at a clear or upload of r that core 0's unfinished commands still
+ * read: hand it to core 0 instead of waiting. Core 0 runs the commands in
+ * order, so when it gets to the write everything before it is drawn; core 1
+ * goes on and waits only if it touches r first (help_pw_wait). Not for
+ * framebuffer slots, nor uploads whose data wraps around the ring. */
+static bool help_defer(const PS1_RECT *r, uint32_t pos, uint32_t type) {
+    if (pw_n) pw_prune();
+    if (pw_n >= PW_N || r->w <= 0 || r->h <= 0 || r->x < 0 || r->y < 0 || r->x + r->w > VRAM_W ||
+        r->y + r->h > VRAM_H)
+        return false;
+    for (int k = 0; k < NSLOT; k++)
+        if (overlaps(&slot[k], r->x, r->y, r->w, r->h)) return false;
+    if (type == GQ_LOAD && ((pos + 1) & (GQ_WORDS - 1)) + (gq[pos & (GQ_WORDS - 1)] & 0xFFFFFF) > GQ_WORDS)
+        return false;
+    bool clut_only;
+    uint32_t need = fp_need(r, &clut_only);
+    uint32_t pn = pw_need_box(r->x, r->y, r->x + r->w - 1, r->y + r->h - 1);
+    if ((int32_t)(pn - need) > 0) need = pn;
+    if (!need || (int32_t)(need - help_done) <= 0) return false; /* nobody waits: do it now */
+    pw[pw_n][0] = (int16_t)r->x;
+    pw[pw_n][1] = (int16_t)r->y;
+    pw[pw_n][2] = (int16_t)(r->x + r->w - 1);
+    pw[pw_n][3] = (int16_t)(r->y + r->h - 1);
+    pw_idx[pw_n++] = help_pub; /* this command's position */
+    clut_cache_flush(); /* cached palettes may come from r */
+    help_deferred++;
+    return true;
+}
+
+/* core 1, before a primitive while writes are with core 0: wait for those
+ * its texture, palette or (PSRAM) draw area overlap */
+static void fp_add_prim(const uint32_t *w);
+static void help_pw_wait(const uint32_t *w) {
+    pw_prune();
+    if (!pw_n) return;
+    pw_checking = true;
+    pw_need = 0;
+    fp_add_prim(w);
+    fp_add(st.x0, st.y0, st.x1, st.y1, 0);
+    pw_checking = false;
+    help_wait_done(pw_need, 6);
+}
+
+static void help_wait_for(const PS1_RECT *r, int site) {
+    bool clut_only;
+    uint32_t need = fp_need(r, &clut_only);
+    if (pw_n) {
+        pw_prune();
+        uint32_t pn = pw_need_box(r->x, r->y, r->x + r->w - 1, r->y + r->h - 1);
+        if ((int32_t)(pn - need) > 0) need = pn, clut_only = false;
+    }
+    for (int k = 0; k < NSLOT; k++) /* a framebuffer slot: its last primitive */
+        if (overlaps(&slot[k], r->x, r->y, r->w, r->h) && r->y + r->h > slot_c0_top[k] &&
+            (int32_t)(slot_last[k] - need) > 0) {
+            need = slot_last[k];
+            clut_only = false;
+        }
+    if ((int32_t)(need - help_pub) > 0) need = help_pub;
+    if (!need || (int32_t)(need - help_done) <= 0) {
+        help_upload_free++;
+        return;
+    }
+    if (clut_only && clut_old_save(r)) {
+        clut_old_saves++;
+        return;
+    }
+    help_sync_n[site]++;
+    {
+        volatile int16_t *l = wait_log[wait_log_n++ & 3];
+        l[0] = (int16_t)site; l[1] = r->x; l[2] = r->y; l[3] = r->w; l[4] = r->h;
+        l[5] = (int16_t)(need - help_done); l[6] = (int16_t)slot_c0_top[0]; l[7] = (int16_t)slot_c0_top[1];
+    }
+    uint32_t t0 = time_us_32();
+    while ((int32_t)(need - help_done) > 0)
+        if (!Audio_Core1Poll()) tight_loop_contents();
+    help_sync_us[site] += time_us_32() - t0;
+    help_wait_sync_us += time_us_32() - t0;
+    help_c1_wait += time_us_32() - t0;
 }
 
 /* texels u0..u1, v0..v1 of tpage, and the CLUT if paletted */
@@ -584,10 +805,10 @@ static void fp_add_tex(uint32_t tpage, uint32_t clut, int u0, int v0, int u1, in
     int px = (int)(tpage & 0xF) * 64, py = (int)((tpage >> 4) & 1) * 256, bpp = (int)(tpage >> 7) & 3;
     if (u1 > 255 || v1 > 255) u0 = v0 = 0, u1 = v1 = 255; /* wraps */
     int sh = bpp == 0 ? 2 : bpp == 1 ? 1 : 0;
-    fp_add(px + (u0 >> sh), py + v0, px + (u1 >> sh), py + v1);
+    fp_add(px + (u0 >> sh), py + v0, px + (u1 >> sh), py + v1, 0);
     if (bpp < 2) {
         int cx = (int)(clut & 0x3F) * 16, cy = (int)(clut >> 6) & 511;
-        fp_add(cx, cy, cx + (bpp ? 255 : 15), cy);
+        fp_add(cx, cy, cx + (bpp ? 255 : 15), cy, 1);
     }
 }
 
@@ -609,6 +830,11 @@ static void fp_add_prim(const uint32_t *w) {
             if (v > v1) v1 = v;
             k += 2;
         }
+        /* the fill rule leaves the right and bottom edges out: a polygon
+         * mapping texels u0..u1 stops sampling at u1 - 1 (a rotated one can
+         * touch the last row at a corner: one row, one frame) */
+        if (u1 > u0) u1--;
+        if (v1 > v0) v1--;
         fp_add_tex(tpage, clut, u0, v0, u1, v1);
     } else if (code & 0x20) { /* sprite */
         int u = (int)(w[2] & 0xFF), v = (int)((w[2] >> 8) & 0xFF), sw, sh;
@@ -624,17 +850,21 @@ static void fp_add_prim(const uint32_t *w) {
 }
 
 /* core 1, after running command at ring position pos */
-static void help_publish(uint32_t pos, uint32_t type, int slot_i) {
+static void help_publish(uint32_t pos, uint32_t type, int slot_i, bool mine) {
     if (help_done == help_pub) { /* core 0 has caught up */
         fp_n = 0;
-        fp_add(st.x0, st.y0, st.x1, st.y1);
     }
     if (type == GQ_PRIM) {
         uint32_t w[16];
         for (int i = 0; i < 16; i++) w[i] = gq[(pos + 1 + i) & (GQ_WORDS - 1)];
         fp_add_prim(w);
-    } else if (type == GQ_AREA0 || type == GQ_AREA1) {
-        fp_add(st.x0, st.y0, st.x1, st.y1);
+        /* drawing into PSRAM: the draw area counts too (into a slot it does
+         * not: an upload over a slot flushes it, and that waits for core 0) */
+        if (slot_i < 0) fp_add(st.x0, st.y0, st.x1, st.y1, 0);
+        else {
+            slot_last[slot_i] = help_pub + 1;
+            if (st.y0 < slot_c0_top[slot_i]) slot_c0_top[slot_i] = st.y0; /* its rows are everywhere */
+        }
     }
     if (help_pub - help_done >= HELP_N) {
         uint32_t t = time_us_32();
@@ -643,9 +873,36 @@ static void help_publish(uint32_t pos, uint32_t type, int slot_i) {
         help_wait_full_us += time_us_32() - t;
         help_c1_wait += time_us_32() - t;
     }
-    help_q[help_pub % HELP_N] = (pos & (GQ_WORDS - 1)) | (type << 13) | ((uint32_t)(slot_i + 1) << 17);
+    help_q[help_pub % HELP_N] = (pos & (GQ_WORDS - 1)) | (type << 13) | ((uint32_t)(slot_i + 1) << 17) |
+                                ((uint32_t)mine << 20);
+    help_c1_last_us = time_us_32();
     __dmb();
     help_pub = help_pub + 1;
+}
+
+/* core 0: a clear or upload core 1 handed over. Same writes as exec_clear's
+ * PSRAM path and load_image_fast, minus the palette cache (core 1's, which
+ * flushed it when it handed the write over). The upload's data is still in
+ * the ring, unwrapped (help_defer checked). */
+static void help_exec_write(uint32_t pos, uint32_t type) {
+    const uint32_t *wp = &gq[(pos + 1) & (GQ_WORDS - 1)];
+    const PS1_RECT *r = (const PS1_RECT *)wp;
+    if (type == GQ_CLEAR) {
+        u16 c = (u16)((((u_char)wp[2]) >> 3) | ((((u_char)wp[3]) >> 3) << 5) | ((((u_char)wp[4]) >> 3) << 10));
+        for (int j = 0; j < r->h; j++) {
+            u16 *row = g_PsxVram + (r->y + j) * VRAM_PITCH + r->x;
+            for (int k = 0; k < r->w; k++) row[k] = c;
+        }
+    } else {
+        const u16 *src = (const u16 *)&wp[2];
+        for (int j = 0; j < r->h; j++) {
+            u16 *row = g_PsxVram + (r->y + j) * VRAM_PITCH + r->x;
+            row_cache_sync(row, r->w, true);
+            copy_px((u16 *)((uintptr_t)row + PSRAM_UNCACHED_OFFSET), src, r->w);
+            src += r->w;
+        }
+    }
+    vrow_forget(r->x, r->y, r->w, r->h);
 }
 
 /* core 0: run one published command on its own rasterizer */
@@ -655,7 +912,10 @@ static void help_exec(HelpCmd c) {
     uint32_t hdr = gq[pos];
     uint32_t n = hdr & 0xFFFFFF;
     uint32_t w[64];
-    if (type > GQ_MASK) return; /* clear/move/load: done by core 1 */
+    if (type > GQ_MASK) {
+        if (c >> 20 & 1) help_exec_write(pos, type); /* handed over (help_defer) */
+        return;                                      /* else done by core 1 */
+    }
     for (uint32_t i = 0; i < n && i < 64; i++) w[i] = gq[(pos + 1 + i) & (GQ_WORDS - 1)];
     switch (type) {
     case GQ_PRIM: {
@@ -686,6 +946,7 @@ static void gpu_help(void) {
         if (help_on) {
             helped = true;
             if (k != help_pub) {
+                help_cur = k;
                 help_exec(help_q[k % HELP_N]);
                 k++;
                 __dmb();
@@ -713,10 +974,7 @@ static void gpu_help(void) {
     if (helped) {
         help_frames++;
         help_idle_us += idle;
-        /* give more to whichever core waited less */
-        uint32_t w1 = help_c1_wait, sp = help_split;
-        if (w1 > idle + 150 && sp < 56) help_split = sp + 1;
-        else if (idle > w1 + 150 && sp > 8) help_split = sp - 1;
+        help_lag_us += time_us_32() - help_c1_last_us;
     }
 }
 
@@ -861,8 +1119,11 @@ bool __not_in_flash_func(Gpu_Core1Work)(uint32_t budget_us) {
             soft_st[0] = soft_st[1];
             soft_cur_tpage[0] = soft_cur_tpage[1];
             help_pub = help_done = 0;
-            help_c1_wait = 0;
-            help_split_cur = help_split;
+            fp_n = 0; /* nothing handed over yet */
+            pw_n = 0;
+            for (int k = 0; k < NSLOT; k++) slot_last[k] = 0, slot_c0_top[k] = VRAM_H * 2;
+            clut_old_used = 0;
+                help_c1_wait = 0;
             help_start_us += time_us_32() - psxv_vsync_ret_us;
             __dmb();
             help_on = true;
@@ -870,37 +1131,55 @@ bool __not_in_flash_func(Gpu_Core1Work)(uint32_t budget_us) {
         uint32_t t = gq_tail;
         uint32_t hdr = gq[t & (GQ_WORDS - 1)];
         uint32_t type = hdr >> 24, n = hdr & 0xFFFFFF;
+        bool deferred = false; /* a clear or upload left to core 0 */
         if (type == GQ_LOAD) {
             for (uint32_t i = 0; i < n; i++) load_buf[i] = gq[(t + 1 + i) & (GQ_WORDS - 1)];
         } else {
             for (uint32_t i = 0; i < n && i < 64; i++) w[i] = gq[(t + 1 + i) & (GQ_WORDS - 1)];
         }
         switch (type) {
-        case GQ_PRIM: exec_prim((u_long *)w, (int)n); break;
+        case GQ_PRIM:
+            if (pw_n) help_pw_wait(w);
+            exec_prim((u_long *)w, (int)n);
+            break;
         case GQ_TPAGE: soft_set_texpage_mode((ParamDrawTexpageMode *)&w[0]); break;
         case GQ_TWIN: soft_set_texture_window(w[0], w[1], w[2], w[3]); break;
         case GQ_AREA0: soft_set_area_start((int)w[0], (int)w[1]); break;
         case GQ_AREA1: soft_set_area_end((int)w[0], (int)w[1]); break;
         case GQ_OFFSET: soft_set_offset((int)w[0], (int)w[1]); break;
         case GQ_MASK: soft_set_mask((int)w[0], (int)w[1]); break;
-        case GQ_CLEAR:
-            help_sync(3);
-            exec_clear((PS1_RECT *)&w[0], (u_char)w[2], (u_char)w[3], (u_char)w[4]);
+        case GQ_CLEAR: {
+            PS1_RECT *cr = (PS1_RECT *)&w[0];
+            /* core 0 does it if its unfinished commands still use the area;
+             * otherwise wait for the last of them that draw into or read it
+             * (a new slot for it waits in slot_for) */
+            if (help_on && help_defer(cr, t, GQ_CLEAR)) {
+                deferred = true;
+                break;
+            }
+            if (!help_on) help_sync(3);
+            else help_wait_for(cr, 3);
+            exec_clear(cr, (u_char)w[2], (u_char)w[3], (u_char)w[4]);
             break;
+        }
         case GQ_MOVE:
             help_sync(4);
             exec_move((PS1_RECT *)&w[0], (int)w[2], (int)w[3]);
             break;
         case GQ_LOAD: {
             PS1_RECT *r = (PS1_RECT *)&load_buf[0];
-            if (!help_on || fp_hits(r)) help_sync(5);
-            else help_upload_free++;
+            if (help_on && help_defer(r, t, GQ_LOAD)) {
+                deferred = true;
+                break;
+            }
+            if (help_on) help_wait_for(r, 5);
+            else help_sync(5);
             before_write(r);
             TIMED_RECT(1, r, load_image_fast(r, (const u16 *)&load_buf[2]));
             break;
         }
         }
-        if (help_on) help_publish(t, type, draw_cur_c[1]);
+        if (help_on) help_publish(t, type, draw_cur_c[1], deferred);
         __dmb();
         gq_tail = t + 1 + n;
         gq_exec = false;

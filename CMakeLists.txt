@@ -208,6 +208,9 @@ option(CASTLE_SPU_REVERB "Emulate SPU reverb (costs ~2 ms per frame)" OFF)
 if(NOT CASTLE_SPU_REVERB)
     target_compile_definitions(psyz_core PRIVATE PSYZ_SPU_NO_REVERB)
 endif()
+# voices, registers and the interpolation table in SRAM: the mixer touches
+# them for every voice of every sample
+target_compile_definitions(psyz_core PRIVATE PSYZ_SPU_HOT_SRAM)
 
 add_custom_target(sotn_overlays)
 foreach(ovl ${SOTN_OVERLAYS})

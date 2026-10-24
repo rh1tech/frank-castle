@@ -448,7 +448,8 @@ void __not_in_flash_func(PsxVideo_Core1Loop)(void) {
         if (!fill_one()) {
             /* scanout is ahead (or idle): rasterize */
             extern bool Gpu_Core1Work(uint32_t budget_us);
-            if (!Gpu_Core1Work(150)) tight_loop_contents();
+            extern bool Audio_Core1IdlePoll(void);
+            if (!Gpu_Core1Work(150) && !Audio_Core1IdlePoll()) tight_loop_contents();
         }
     }
 }
@@ -518,17 +519,32 @@ static void frame_stats(uint64_t work_us) {
                (unsigned long)(gpu_busy_us / 20000));
         {
             extern volatile uint32_t help_cmds, help_frames, help_wait_sync_us, help_wait_full_us,
-                help_draw_us, help_start_us, help_idle_us, help_split;
+                help_draw_us, help_start_us, help_idle_us, help_lag_us;
             uint32_t hf = help_frames ? help_frames : 1;
             PV("[perf] help: %lu frames, %lu prims/frame, core 0 draws %lu us/frame from %lu us; "
-               "core 1 waits for it %lu us (sync) %lu us (ring full), core 0 idle %lu us per frame; split %lu/64\n",
+               "core 1 waits for it %lu us (sync) %lu us (ring full), core 0 idle %lu us, finishes %lu us after core 1 per frame\n",
                (unsigned long)help_frames, (unsigned long)(help_cmds / hf), (unsigned long)(help_draw_us / hf),
                (unsigned long)(help_start_us / hf), (unsigned long)(help_wait_sync_us / hf),
                (unsigned long)(help_wait_full_us / hf), (unsigned long)(help_idle_us / hf),
-               (unsigned long)help_split);
-            help_idle_us = 0;
-            extern volatile uint32_t help_sync_n[6], help_sync_us[6], help_upload_free;
-            PV("[perf] help: %lu uploads/frame skipped the wait\n", (unsigned long)(help_upload_free / hf));
+               (unsigned long)(help_lag_us / hf));
+            help_idle_us = help_lag_us = 0;
+            extern volatile uint32_t help_sync_n[7], help_sync_us[7], help_upload_free, help_deferred;
+            extern volatile uint32_t clut_old_saves;
+            PV("[perf] help: %lu uploads/frame skipped the wait, %lu kept the old palette row for core 0\n",
+               (unsigned long)(help_upload_free / hf), (unsigned long)(clut_old_saves / hf));
+            clut_old_saves = 0;
+            {
+                extern volatile int16_t wait_log[4][8];
+                for (int k = 0; k < 4; k++)
+                    PV("[perf] waited: site %d rect %d,%d %dx%d, %d commands behind, core 0 top rows %d %d\n",
+                       wait_log[k][0], wait_log[k][1], wait_log[k][2], wait_log[k][3], wait_log[k][4],
+                       wait_log[k][5], wait_log[k][6], wait_log[k][7]);
+                extern volatile int16_t fp_hit_log[4][8];
+                for (int k = 0; k < 4; k++)
+                    PV("[perf] upload %d,%d %dx%d waited: it hits %d,%d..%d,%d\n", fp_hit_log[k][0], fp_hit_log[k][1],
+                       fp_hit_log[k][2], fp_hit_log[k][3], fp_hit_log[k][4], fp_hit_log[k][5], fp_hit_log[k][6],
+                       fp_hit_log[k][7]);
+            }
             help_upload_free = 0;
             PV("[perf] help syncs n/us per frame: flush %lu/%lu load %lu/%lu alloc %lu/%lu clear %lu/%lu move %lu/%lu upload %lu/%lu\n",
                (unsigned long)(help_sync_n[0] / hf), (unsigned long)(help_sync_us[0] / hf),
@@ -537,7 +553,11 @@ static void frame_stats(uint64_t work_us) {
                (unsigned long)(help_sync_n[3] / hf), (unsigned long)(help_sync_us[3] / hf),
                (unsigned long)(help_sync_n[4] / hf), (unsigned long)(help_sync_us[4] / hf),
                (unsigned long)(help_sync_n[5] / hf), (unsigned long)(help_sync_us[5] / hf));
-            for (int k = 0; k < 6; k++) help_sync_n[k] = help_sync_us[k] = 0;
+            PV("[perf] help: %lu writes/frame handed to core 0; core 1 waited for them %lu times, %lu us/frame\n",
+               (unsigned long)(help_deferred / hf), (unsigned long)(help_sync_n[6] / hf),
+               (unsigned long)(help_sync_us[6] / hf));
+            help_deferred = 0;
+            for (int k = 0; k < 7; k++) help_sync_n[k] = help_sync_us[k] = 0;
             help_cmds = help_frames = help_wait_sync_us = help_wait_full_us = help_draw_us = help_start_us = 0;
         }
         extern volatile uint32_t gpu_sync_at_us, gpu_drain_at_us, gpu_tl_frames;
@@ -584,6 +604,16 @@ static void frame_stats(uint64_t work_us) {
                    soft_tri_n / stat_frames, soft_tri_n ? soft_tri_setup_cyc / soft_tri_n : 0,
                    soft_tri_span_cyc / stat_frames);
             soft_tri_n = soft_tri_setup_cyc = soft_tri_span_cyc = 0;
+            extern volatile uint32_t audio_mix_us[2], audio_mix_frames[2];
+            PV("[perf] audio mixing per frame: core 0 %lu us (%lu samples), core 1 %lu us (%lu samples)\n",
+               (unsigned long)(audio_mix_us[0] / stat_frames), (unsigned long)(audio_mix_frames[0] / stat_frames),
+               (unsigned long)(audio_mix_us[1] / stat_frames), (unsigned long)(audio_mix_frames[1] / stat_frames));
+            audio_mix_us[0] = audio_mix_us[1] = audio_mix_frames[0] = audio_mix_frames[1] = 0;
+            extern unsigned soft_tg_px[2][3];
+            PV("[perf] textured gouraud px/frame along rows 4/8/15bpp %u/%u/%u, down columns %u/%u/%u\n",
+               soft_tg_px[0][0] / stat_frames, soft_tg_px[0][1] / stat_frames, soft_tg_px[0][2] / stat_frames,
+               soft_tg_px[1][0] / stat_frames, soft_tg_px[1][1] / stat_frames, soft_tg_px[1][2] / stat_frames);
+            for (int k = 0; k < 6; k++) soft_tg_px[k / 3][k % 3] = 0;
 
         }
         {

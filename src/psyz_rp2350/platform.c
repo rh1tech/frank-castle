@@ -428,3 +428,7 @@ int stat(const char *path, struct stat *st) {
     st->st_mode = (fi.fattrib & AM_DIR) ? S_IFDIR : S_IFREG;
     return 0;
 }
+
+/* The SD card is core 0's: music sectors core 1 would need while mixing
+ * come from psyz's read-ahead, filled on core 0 (Psyz_CdPrefetch). */
+int Psyz_CdReadAllowed(void) { return get_core_num() == 0; }

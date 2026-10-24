@@ -102,6 +102,12 @@ typedef struct {
 static SoftState soft_st[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = {0, 0, VRAM_W - 1, VRAM_H - 1, 0, 0}};
 #define st (soft_st[SOFT_CORE_ID()])
 
+// Rows this core draws: -1 all of them, 0 or 1 only rows of that parity (two
+// cores sharing every primitive row by row, see gpu_fast.c's push_band).
+static int soft_par_c[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = -1};
+#define soft_par (soft_par_c[SOFT_CORE_ID()])
+#define ROW_MINE(y) (soft_par < 0 || ((y) & 1) == soft_par)
+
 // One vertex after packet parsing. Colors stay 8-bit until the pixel write.
 typedef struct {
     int x, y;
@@ -132,7 +138,11 @@ static void clut_cache_flush(void) {
 }
 static inline const u16* clut_cached(u16 id, const u16* src, int n) {
     if (!SOFT_MAIN_CORE()) {
+#ifdef SOFT_CLUT_SIDE
+        return SOFT_CLUT_SIDE(id, src, n);
+#else
         return src;
+#endif
     }
     for (int i = 0; i < SOFT_CLUT_WAYS; i++) {
         if (clut_cache_key[i] == id) {
@@ -655,12 +665,14 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
             uoff = (u0 & ~3) >> 1;
             words = ((u1 >> 1) - uoff) / 2 + 1;
         }
-        int cur = 0, n = i1 - i0 + 1;
-        if (SOFT_ROW_FETCH(t.page + ((v->v + j0) & 0xFF) * VRAM_PITCH + uoff, rbuf[0], words)) {
-            for (int j = j0; j <= j1; j++) {
+        int cur = 0, n = i1 - i0 + 1, js = j0, jstep = soft_par < 0 ? 1 : 2;
+        if (!ROW_MINE(y0 + js)) js++;
+        if (js > j1) return;
+        if (SOFT_ROW_FETCH(t.page + ((v->v + js) & 0xFF) * VRAM_PITCH + uoff, rbuf[0], words)) {
+            for (int j = js; j <= j1; j += jstep) {
                 SOFT_ROW_WAIT();
-                if (j < j1)
-                    SOFT_ROW_FETCH(t.page + ((v->v + j + 1) & 0xFF) * VRAM_PITCH + uoff,
+                if (j + jstep <= j1)
+                    SOFT_ROW_FETCH(t.page + ((v->v + j + jstep) & 0xFF) * VRAM_PITCH + uoff,
                                    rbuf[cur ^ 1], words);
                 u16* dst = &DROW(y0 + j)[x0 + i0];
                 const u16* trow = rbuf[cur] - uoff;
@@ -674,6 +686,7 @@ SOFT_RASTER_IRAM static void raster_sprite(const SV* v, int w, int h, u16 tpage,
     }
 #endif
     for (int j = j0; j <= j1; j++) {
+        if (!ROW_MINE(y0 + j)) continue;
         u16* row = DROW(y0 + j);
         int tv = (v->v + j) & 0xFF;
         const u16* trow = t.page + tv * VRAM_PITCH;
@@ -735,6 +748,7 @@ SOFT_RASTER_IRAM static void raster_tile(const SV* v, int w, int h, int semi, in
         u16 c = (u16)((v->r >> 3) | ((v->g >> 3) << 5) | ((v->b >> 3) << 10));
         u32 cc = (u32)c | ((u32)c << 16);
         for (int y = ya; y <= yb; y++) {
+            if (!ROW_MINE(y)) continue;
             u16* p = DROW(y) + xa;
             int n = xb - xa + 1;
 #ifdef ESP_PLATFORM
@@ -758,6 +772,7 @@ SOFT_RASTER_IRAM static void raster_tile(const SV* v, int w, int h, int semi, in
     }
 
     for (int y = ya; y <= yb; y++) {
+        if (!ROW_MINE(y)) continue;
         u16* row = DROW(y);
         for (int x = xa; x <= xb; x++) {
             put_flat(&row[x], v->r, v->g, v->b, semi, abr);
@@ -770,6 +785,8 @@ SOFT_RASTER_IRAM static void raster_tile(const SV* v, int w, int h, int semi, in
 static unsigned tri_c_setup_end_c[SOFT_NCORE]; // cycle stamp when span drawing starts (diagnostic)
 #define tri_c_setup_end (tri_c_setup_end_c[SOFT_CORE_ID()])
 unsigned soft_tri_setup_cyc, soft_tri_span_cyc, soft_tri_n;
+/* textured+gouraud pixels by sampling direction and depth (diagnostic) */
+unsigned soft_tg_px[2][3];
 #define CYC() (*(volatile unsigned*)0xE0001004)
 SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV* c, int textured,
                        u16 tpage, u16 clut, int semi, int gouraud);
@@ -951,6 +968,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
         fx fbdx = gouraud ? bdx : 0, fbdy = gouraud ? bdy : 0;
         for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
                  w2row += B2, r0 += frdy, g0 += fgdy, b0 += fbdy) {
+            if (!ROW_MINE(y)) continue;
             int xl = minx, xr = maxx;
             int we[3] = {w0row, w1row, w2row};
             int Ae[3] = {A0, A1, A2};
@@ -1029,6 +1047,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
                       a->r == 0x80 && a->g == 0x80 && a->b == 0x80, 0};
         for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
                  w2row += B2, urow += udy, vrow += vdy) {
+            if (!ROW_MINE(y)) continue;
             int xl = minx, xr = maxx;
             int we[3] = {w0row, w1row, w2row};
             int Ae[3] = {A0, A1, A2};
@@ -1071,6 +1090,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
         for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1,
                  w2row += B2, rrow += rdy, grow += gdy, brow += bdy,
                  urow += udy, vrow += vdy) {
+            if (!ROW_MINE(y)) continue;
             int xl = minx, xr = maxx;
             int we[3] = {w0row, w1row, w2row};
             int Ae[3] = {A0, A1, A2};
@@ -1099,6 +1119,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
             fx ui = urow + d * udx, vi = vrow + d * vdx;
             u16* row = DROW(y) + xl;
             int n = xr - xl + 1;
+            soft_tg_px[(vdx < 0 ? -vdx : vdx) > (udx < 0 ? -udx : udx)][t.bpp > 2 ? 2 : t.bpp] += n;
             if (t.bpp == 0) span_tg4(row, n, ui, vi, ri, gi, bi, &sc);
             else if (t.bpp == 1) span_tg8(row, n, ui, vi, ri, gi, bi, &sc);
             else span_tg15(row, n, ui, vi, ri, gi, bi, &sc);
@@ -1113,6 +1134,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
     // bit-exact with the per-pixel-test form.
     for (int y = miny; y <= maxy; y++, w0row += B0, w1row += B1, w2row += B2,
              rrow += rdy, grow += gdy, brow += bdy, urow += udy, vrow += vdy) {
+        if (!ROW_MINE(y)) continue;
         int xl = minx, xr = maxx;
         {
             int we[3] = {w0row, w1row, w2row};
@@ -1175,7 +1197,7 @@ SOFT_RASTER_IRAM static void raster_line(const SV* a, const SV* b, int semi) {
     }
     int abr = (cur_tpage >> 5) & 3;
     for (int i = 0;; i++) {
-        if (x0 >= st.x0 && x0 <= st.x1 && y0 >= st.y0 && y0 <= st.y1) {
+        if (x0 >= st.x0 && x0 <= st.x1 && y0 >= st.y0 && y0 <= st.y1 && ROW_MINE(y0)) {
             int r = a->r + (b->r - a->r) * i / steps;
             int g = a->g + (b->g - a->g) * i / steps;
             int bl = a->b + (b->b - a->b) * i / steps;
