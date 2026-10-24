@@ -387,7 +387,8 @@ static void soft_tex_forget(int x, int y, int w, int h) {
 static const u16* soft_tex_sram(int tpx, int tpy, int u0, int v0, int u1, int v1, int* pitch) {
     TexBlk* blk = texblk_c[SOFT_CORE_ID()];
     // a texel of margin: interpolated coordinates can round one past a vertex
-    int x0 = tpx + ((u0 > 0 ? u0 - 1 : 0) >> 2), x1 = tpx + ((u1 < 255 ? u1 + 1 : 255) >> 2);
+    // halfwords in pairs: the span loops read texels 32 bits at a time
+    int x0 = tpx + (((u0 > 0 ? u0 - 1 : 0) >> 2) & ~1), x1 = tpx + (((u1 < 255 ? u1 + 1 : 255) >> 2) | 1);
     int y0 = tpy + (v0 > 0 ? v0 - 1 : 0), y1 = tpy + (v1 < 255 ? v1 + 1 : 255);
     int k;
     for (k = 0; k < TEXBLK_N; k++) {
@@ -451,14 +452,15 @@ static const u16* soft_tex_sram(int tpx, int tpy, int u0, int v0, int u1, int v1
 
 // 4bpp: one halfword holds four texels; re-read it only when the sample
 // moves to another one (scaled and rotated spans revisit it often)
+// (a 32-bit word: eight texels per read; texture rows are 4-byte aligned)
 #define TEXEL4                                                                 \
     do {                                                                       \
-        int key_ = v << 8 | u >> 2;                                            \
+        int key_ = v << 8 | u >> 3;                                            \
         if (key_ != hw_key) {                                                  \
             hw_key = key_;                                                     \
-            hw = TEX_RD(&page[v * pitch + (u >> 2)]);                          \
+            hw = TEX_RD((const uint32_t*)&page[v * pitch + ((u >> 3) << 1)]);  \
         }                                                                      \
-        texel = clut[(hw >> ((u & 3) * 4)) & 0xF];                             \
+        texel = clut[(hw >> ((u & 7) * 4)) & 0xF];                             \
     } while (0)
 #define TEXEL8 texel = clut[(TEX_RD(&page[v * pitch + (u >> 1)]) >> ((u & 1) * 8)) & 0xFF]
 #define TEXEL15 texel = TEX_RD(&page[v * pitch + u])
@@ -472,7 +474,7 @@ static const u16* soft_tex_sram(int tpx, int tpy, int u0, int v0, int u1, int v1
         int32_t udx = c->udx, vdx = c->vdx;                                     \
         int semi = c->semi;                                                     \
         int hw_key = -1;                                                        \
-        u16 hw = 0;                                                             \
+        uint32_t hw = 0;                                                        \
         (void)clut;                                                             \
         (void)hw_key;                                                           \
         (void)hw;                                                               \
@@ -500,7 +502,7 @@ static const u16* soft_tex_sram(int tpx, int tpy, int u0, int v0, int u1, int v1
         int32_t udx = c->udx, vdx = c->vdx;                                     \
         int32_t rdx = c->rdx, gdx = c->gdx, bdx = c->bdx;                       \
         int hw_key = -1;                                                        \
-        u16 hw = 0;                                                             \
+        uint32_t hw = 0;                                                        \
         (void)clut;                                                             \
         (void)hw_key;                                                           \
         (void)hw;                                                               \
@@ -539,14 +541,14 @@ SOFT_RASTER_IRAM static void span_tf4(u16* dst, int n, int32_t ui, int32_t vi,
     int32_t udx = c->udx;
     int semi = c->semi, neutral = c->neutral;
     int hw_idx = -1;
-    u16 hw = 0;
+    uint32_t hw = 0;
     for (; n > 0; n--, dst++, ui += udx) {
         int u = (ui >> 16) & 0xFF;
-        if ((u >> 2) != hw_idx) {
-            hw_idx = u >> 2;
-            hw = TEX_RD(&trow[hw_idx]);
+        if ((u >> 3) != hw_idx) { // eight texels per 32-bit read
+            hw_idx = u >> 3;
+            hw = TEX_RD((const uint32_t*)&trow[hw_idx << 1]);
         }
-        u16 texel = clut[(hw >> ((u & 3) * 4)) & 0xF];
+        u16 texel = clut[(hw >> ((u & 7) * 4)) & 0xF];
         if (!texel) continue;
         u16 m = neutral ? (u16)(texel & 0x7FFF)
                         : (u16)(lr[texel & 0x1F] | lg[(texel >> 5) & 0x1F] | lb[(texel >> 10) & 0x1F]);
@@ -582,12 +584,12 @@ SOFT_RASTER_IRAM static void span_tg4(u16* dst, int n, int32_t ui, int32_t vi,
         uint32_t hw = 0;
         for (; dst < end; dst++, ui += udx, rb = __uadd16(rb, rbd), gi += gd) {
             int u = (ui >> 16) & 0xFF;
-            if ((u >> 2) != hw_idx) {
-                hw_idx = u >> 2;
-                hw = TEX_RD(&trow[hw_idx]);
+            if ((u >> 3) != hw_idx) {
+                hw_idx = u >> 3;
+                hw = TEX_RD((const uint32_t*)&trow[hw_idx << 1]);
                 soft_tg_rd++;
             }
-            uint32_t texel = clut[(hw >> ((u & 3) * 4)) & 0xF];
+            uint32_t texel = clut[(hw >> ((u & 7) * 4)) & 0xF];
             if (!texel) continue;
             uint32_t r = __usat((int32_t)(((texel & 0x1F) * ((rb >> 8) & 0xFF)) >> 7), 5);
             uint32_t g = __usat((int32_t)((((texel >> 5) & 0x1F) * ((uint32_t)gi >> 16 & 0xFF)) >> 7), 5);
@@ -604,13 +606,13 @@ SOFT_RASTER_IRAM static void span_tg4(u16* dst, int n, int32_t ui, int32_t vi,
     uint32_t hw = 0;
     for (; dst < end; dst++, ui += udx, vi += vdx, rb = __uadd16(rb, rbd), gi += gd) {
         int u = (ui >> 16) & 0xFF, v = (vi >> 16) & 0xFF;
-        int key = v << 8 | u >> 2;
+        int key = v << 8 | u >> 3;
         if (key != hw_key) {
             hw_key = key;
-            hw = TEX_RD(&page[v * pitch + (u >> 2)]);
+            hw = TEX_RD((const uint32_t*)&page[v * pitch + ((u >> 3) << 1)]);
             soft_tg_rd2++;
         }
-        uint32_t texel = clut[(hw >> ((u & 3) * 4)) & 0xF];
+        uint32_t texel = clut[(hw >> ((u & 7) * 4)) & 0xF];
         if (!texel) continue;
         uint32_t r = __usat((int32_t)(((texel & 0x1F) * ((rb >> 8) & 0xFF)) >> 7), 5);
         uint32_t g = __usat((int32_t)((((texel >> 5) & 0x1F) * ((uint32_t)gi >> 16 & 0xFF)) >> 7), 5);

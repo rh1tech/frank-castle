@@ -284,7 +284,8 @@ void Psyz_PadsPoll(void) {
 #define DATA_DIR "/castle"
 #define MAX_FDS 4
 
-static FIL fds[MAX_FDS];
+/* memory-card files: rarely touched, and the SD driver reads with the CPU */
+static FIL fds[MAX_FDS] __attribute__((section(".psram_bss.fds")));
 static bool fd_used[MAX_FDS];
 
 /* "bu00:BASLUS-00067DRAX00" -> "/castle/bu00/BASLUS-00067DRAX00" */
