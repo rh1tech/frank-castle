@@ -1,14 +1,16 @@
 /*
- * frank-castle — psyz audio backend: SPU mixing on core 1, I2S output.
+ * frank-castle — psyz audio backend: SPU mixing, HDMI or I2S output.
  *
  * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * https://github.com/rh1tech/frank-castle
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * The game core runs the SPU emulator once per VSync (Audio_FrameFill) and
- * pushes 44.1 kHz stereo frames into a ring; the I2S DMA IRQ (also core 0:
- * sharing core 1 with the HSTX IRQ breaks the HDMI timing) only copies from
- * the ring. Core 1 is left to the scanout and the rasterizer.
+ * pushes 44.1 kHz stereo frames into a ring. One output drains it (the
+ * settings choose which, at run time): the HSTX IRQ on core 1, four frames
+ * for each HDMI audio packet (drivers/hdmi/hstx_data_island_queue.c), or
+ * the I2S DMA IRQ on core 0 (sharing core 1 with the HSTX IRQ breaks the
+ * HDMI timing). Core 1 is otherwise left to the scanout and the rasterizer.
  *
  * Psyz_SpuPullSamples() also advances the root counters, whose handlers are
  * the game's sound driver and must run on the game thread. Psyz_RcntAdd is
@@ -18,6 +20,8 @@
 
 #include "audio.h"
 #include "board_config.h"
+#include "castle_audio.h"
+#include "hstx_data_island_queue.h"
 
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
@@ -63,13 +67,75 @@ void Audio_DrainRcnt(void) {
     __real_Psyz_RcntAdd(n);
 }
 
-/* ---- I2S ---- */
+/* ---- Outputs ---- */
+
+/* The settings menu: volume (gain/256), a pause, the output. Paused, the
+ * ring is not drained: it stays full, nothing is mixed and the sound
+ * driver's ticks stand still, so the music resumes where it stopped. */
+static volatile uint32_t audio_gain = 256;
+static volatile bool audio_paused;
+static volatile int audio_out = AUDIO_OUT_HDMI;
+
+void Audio_SetGain(uint32_t gain) { audio_gain = gain > 256 ? 256 : gain; }
+void Audio_Pause(bool on) { audio_paused = on; }
+
+static void __not_in_flash_func(hdmi_source)(uint32_t frames[4]);
+
+/* Only one output drains the ring; the other plays silence. */
+void Audio_SetOutput(int out) {
+    out = out == AUDIO_OUT_I2S ? AUDIO_OUT_I2S : AUDIO_OUT_HDMI;
+    if (out == audio_out) return;
+    if (out == AUDIO_OUT_I2S) hstx_di_queue_set_audio_source(NULL); /* the HDMI IRQ stops reading */
+    __dmb();
+    audio_out = out;
+    __dmb();
+    if (out == AUDIO_OUT_HDMI) hstx_di_queue_set_audio_source(hdmi_source);
+    printf("audio: output %s\n", out == AUDIO_OUT_HDMI ? "HDMI" : "I2S");
+}
+
+int Audio_GetOutput(void) { return audio_out; }
+
+static inline uint32_t __not_in_flash_func(scale)(uint32_t v, int32_t gain) {
+    int32_t l = ((int32_t)(int16_t)v * gain) >> 8;
+    int32_t r = ((int32_t)(int16_t)(v >> 16) * gain) >> 8;
+    return (uint16_t)l | ((uint32_t)(uint16_t)r << 16);
+}
+
+/* HDMI: the HSTX IRQ (core 1) takes the next audio packet's four frames.
+ * It runs as fast as the HDMI clock: 44.1 kHz, from the same crystal. */
+volatile uint32_t audio_hdmi_underruns;
+static void __not_in_flash_func(hdmi_source)(uint32_t frames[4]) {
+    if (audio_paused || audio_out != AUDIO_OUT_HDMI) {
+        frames[0] = frames[1] = frames[2] = frames[3] = 0;
+        return;
+    }
+    const uint32_t rd = ring_rd, avail = ring_wr - rd;
+    const uint32_t n = avail < 4 ? avail : 4;
+    const int32_t gain = (int32_t)audio_gain;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t v = ring[(rd + i) & (RING_FRAMES - 1)];
+        frames[i] = gain >= 256 ? v : scale(v, gain);
+    }
+    for (uint32_t i = n; i < 4; i++) frames[i] = 0;
+    if (n < 4 && audio_running) audio_hdmi_underruns++;
+    __dmb();
+    ring_rd = rd + n;
+}
 
 static void __not_in_flash_func(i2s_fill)(int idx, uint32_t *buf, uint32_t frames) {
     (void)idx;
+    if (audio_paused || audio_out != AUDIO_OUT_I2S) {
+        memset(buf, 0, frames * 4);
+        return;
+    }
     uint32_t rd = ring_rd, avail = ring_wr - rd;
     uint32_t n = avail < frames ? avail : frames;
-    for (uint32_t i = 0; i < n; i++) buf[i] = ring[(rd + i) & (RING_FRAMES - 1)];
+    const int32_t gain = (int32_t)audio_gain;
+    if (gain >= 256) {
+        for (uint32_t i = 0; i < n; i++) buf[i] = ring[(rd + i) & (RING_FRAMES - 1)];
+    } else {
+        for (uint32_t i = 0; i < n; i++) buf[i] = scale(ring[(rd + i) & (RING_FRAMES - 1)], gain);
+    }
     if (n < frames) {
         memset(buf + n, 0, (frames - n) * 4);
         if (audio_running) audio_underruns++;
@@ -89,6 +155,7 @@ void Audio_Init(void) {
     i2s_init(&cfg);
     i2s_set_fill_callback(i2s_fill);
     i2s_start();
+    if (audio_out == AUDIO_OUT_HDMI) hstx_di_queue_set_audio_source(hdmi_source);
 }
 
 /* Game core. Mixing is spread so it never sits on the frame's critical

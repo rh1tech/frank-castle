@@ -24,9 +24,15 @@
 #include "ff.h"
 #include "vram_pitch.h"
 #include "diskio.h"
+#include "shell.h"
+#include "settings.h"
+#include "usbhid.h"
+#include "castle_audio.h"
 
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
+#include "hardware/regs/addressmap.h"
+#include "hardware/regs/sysinfo.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -49,7 +55,6 @@ bool Psyz_DisplayOrigin(int *x, int *y) {
     return true;
 }
 
-extern void Audio_Init(void);
 
 static void core1_main(void) {
     platform_cyccnt_enable(); /* core 1's own DWT, for cycle diagnostics */
@@ -63,29 +68,41 @@ static void core1_main(void) {
     PsxVideo_Core1Loop();
 }
 
-/* Before the game owns VRAM, messages are drawn straight into it. */
+/* Waiting on an error screen: USB, the UART (~BOOT~, ~RST~) and the drips.
+ * True once a key or a gamepad button went down. */
+static bool any_key(void) {
+    static uint32_t gp_prev;
+    int ch;
+    while ((ch = getchar_timeout_us(0)) >= 0) platform_uart_cmd(ch);
+    platform_usb_poll();
+    uint8_t code;
+    int down;
+    bool hit = false;
+    while (usbhid_get_key_action(&code, &down))
+        if (down) hit = true;
+    uint32_t gp = usbhid_gamepad_buttons();
+    if (gp & ~gp_prev) hit = true;
+    gp_prev = gp;
+    shell_tick();
+    return hit;
+}
+
+/* A fatal error: its message on the error screen until a key, then a
+ * restart. */
 static void __attribute__((noreturn)) fatal(const char *what, const char *detail) {
     printf("FATAL: %s: %s\n", what, detail);
-    fbcon_t con;
-    fbcon_init(&con, g_PsxVram, 320, 240, VRAM_PITCH);
-    fbcon_clear(&con);
-    con.fg = BGR555(255, 80, 80);
-    fbcon_puts(&con, "\n  frank-castle\n\n  ");
-    con.fg = BGR555(255, 255, 255);
-    fbcon_puts(&con, what);
-    fbcon_puts(&con, "\n\n  ");
-    fbcon_puts(&con, detail);
-    while (1) {
-        int ch = getchar_timeout_us(1000);
-        if (ch >= 0) platform_uart_cmd(ch); /* ~BOOT~ still works here */
+    shell_error(what, "Press any key to restart");
+    shell_errorf("%s\n", detail);
+    while (!any_key()) {
     }
+    platform_reboot(false);
 }
 
 /* The game walked into an area whose stage is not built yet (sim_pc.c). */
 void Platform_StageMissing(const char *name) {
     static char msg[48];
-    snprintf(msg, sizeof(msg), "stage '%s' is not in this build", name);
-    fatal("Area not available yet", msg);
+    snprintf(msg, sizeof(msg), "The stage '%s' is not in this build.", name);
+    fatal("AREA NOT AVAILABLE", msg);
 }
 
 static bool find_cue(char *out, size_t outlen) {
@@ -134,7 +151,13 @@ static bool uart_args(char *buf, size_t len) {
 static int read_extra_args(char *buf, size_t len, char **argv, int max) {
     FIL f;
     UINT got = 0;
-    if (uart_args(buf, len)) {
+    const char *skip = Settings_BootArgs();
+    if (skip) {
+        /* F9 restarted the console to skip the opening */
+        strncpy(buf, skip, len - 1);
+        buf[len - 1] = 0;
+        printf("args from F9: %s\n", buf);
+    } else if (uart_args(buf, len)) {
         /* given on the UART */
     } else if (f_open(&f, "/castle/args.txt", FA_READ) == FR_OK) {
         f_read(&f, buf, (UINT)len - 1, &got);
@@ -148,6 +171,58 @@ static int read_extra_args(char *buf, size_t len, char **argv, int max) {
     for (char *tok = strtok(buf, " \t\r\n"); tok && n < max; tok = strtok(NULL, " \t\r\n"))
         argv[n++] = tok;
     return n;
+}
+
+/* "~C errtest sd|disc|game~": show an error screen for 8 s, then restart
+ * (screenshots of the screens without pulling the card). */
+void Shell_ErrTest(const char *what) {
+    while (*what == ' ') what++;
+    if (!strcmp(what, "sd")) {
+        shell_error("NO SD CARD", "Waiting for the card...");
+        shell_printf("Insert a FAT32 or exFAT microSD card with your Castlevania: SOTN disc image in:\n");
+        shell_highlight("  /castle/<name>.cue + .bin (SLUS-00067)\n");
+    } else if (!strcmp(what, "disc")) {
+        shell_error("NO GAME DISC", "Waiting for the files...");
+        shell_printf("Copy your dump of the USA disc (SLUS-00067, BIN/CUE, MODE2/2352) to the card:\n");
+        shell_highlight("  /castle/Castlevania - Symphony of the Night (USA).cue\n  /castle/... (Track 1).bin\n");
+    } else {
+        shell_error("AREA NOT AVAILABLE", "Press any key to restart");
+        shell_errorf("The stage 'xyz' is not in this build.\n");
+    }
+    const uint32_t t0 = time_us_32();
+    while (time_us_32() - t0 < 8000000u) shell_tick();
+    platform_reboot(false);
+}
+
+static void wait_for_sd(void) {
+    if (platform_mount_sd() == FR_OK) return;
+    shell_error("NO SD CARD", "Waiting for the card...");
+    shell_printf("Insert a FAT32 or exFAT microSD card with your Castlevania: SOTN disc image in:\n");
+    shell_highlight("  /castle/<name>.cue + .bin (SLUS-00067)\n");
+    for (;;) {
+        const uint32_t until = time_us_32() + 1000000;
+        while ((int32_t)(time_us_32() - until) < 0) any_key();
+        disk_initialize(0);
+        if (platform_mount_sd() == FR_OK) break;
+    }
+    shell_welcome();
+    shell_printf("SD card mounted.\n");
+}
+
+static void wait_for_disc(char *cue, size_t len) {
+    if (find_cue(cue, len)) return;
+    shell_error("NO GAME DISC", "Waiting for the files...");
+    shell_printf("Copy your dump of the USA disc (SLUS-00067, BIN/CUE, MODE2/2352) to the card:\n");
+    shell_highlight("  /castle/Castlevania - Symphony of the Night (USA).cue\n  /castle/... (Track 1).bin\n");
+    /* the card may be swapped meanwhile: mount again each time */
+    for (;;) {
+        const uint32_t until = time_us_32() + 2000000;
+        while ((int32_t)(time_us_32() - until) < 0) any_key();
+        disk_initialize(0);
+        if (platform_mount_sd() == FR_OK && find_cue(cue, len)) break;
+    }
+    shell_welcome();
+    shell_printf("Game disc found.\n");
 }
 
 int main(void) {
@@ -165,21 +240,52 @@ int main(void) {
     static uint32_t core1_stack[6 * 1024 / 4];
     multicore_launch_core1_with_stack(core1_main, core1_stack, sizeof(core1_stack));
 
+    shell_welcome();
+    shell_printf("frank-castle %s on M2, RP2350%s\n", CASTLE_VERSION,
+                 (*(io_ro_32 *)(SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET) & 1) ? "A" : "B");
     platform_init_usb();
-    Audio_Init(); /* I2S IRQ on core 0; the SPU mixer runs on core 1 */
+    Audio_Init(); /* HDMI (HSTX IRQ, core 1) or I2S (its IRQ on core 0) */
+#if CASTLE_USB_CONSOLE
+    shell_printf("USB: the CDC console (development build).\n");
+#else
+    shell_printf("USB host started: keyboard, gamepad.\n");
+#endif
 
-    if (platform_mount_sd() != FR_OK) fatal("SD card", "no readable FAT/exFAT filesystem");
+    wait_for_sd();
     static char cue[160];
-    if (!find_cue(cue, sizeof(cue)))
-        fatal("Game disc not found", "copy the SLUS-00067 .cue/.bin to /castle/");
+    wait_for_disc(cue, sizeof(cue));
     /* SD cards occasionally drop out right after a warm reset (or when a USB
      * device enumerates): re-initialise the card and mount again. */
     for (int attempt = 0; !DiscProvider_Mount(&cd_fatfs_backend, cue); attempt++) {
-        if (attempt == 3) fatal("Cannot read the disc image", cue);
+        if (attempt == 3) fatal("CANNOT READ THE DISC", cue);
         printf("disc mount failed, re-initialising the SD card (%d)\n", attempt + 1);
         sleep_ms(200 << attempt);
         disk_initialize(0);
         platform_mount_sd();
+    }
+    shell_printf("Disc: %s\n", cue + 8);
+    Settings_Load();
+    shell_dim("F12 or Select+Start: settings, also in the game.\n");
+    shell_highlight("Starting Castlevania...\n");
+    /* the welcome stays up 4 s, and at least 2.5 s after the hint above:
+     * the settings can be opened meanwhile */
+    const uint32_t hint_at = shell_shown_ms();
+    while (shell_shown_ms() < 4000 || shell_shown_ms() - hint_at < 2500) {
+        Input_Poll();
+        int ch;
+        while ((ch = getchar_timeout_us(0)) >= 0) platform_uart_cmd(ch);
+        if (Input_MenuRequested()) {
+            Settings_Run(false);
+            shell_highlight("Starting Castlevania...\n");
+            break;
+        }
+        if (Settings_SkipRequested()) { /* F9: straight to the Castle Entrance */
+            Settings_SkipAtBoot();
+            shell_highlight("F9: to the Castle Entrance.\n");
+            break;
+        }
+        platform_usb_poll();
+        shell_tick();
     }
 
     static char args_buf[256];
@@ -199,7 +305,7 @@ int main(void) {
     int r = sotn_main(argc, argv);
     printf("game exited (%d)\n", r);
     /* bad ~ARGS~ end up here: keep answering ~BOOT~ / ~RST~ */
-    static char msg[32];
-    snprintf(msg, sizeof(msg), "exit code %d", r);
-    fatal("Game exited", msg);
+    static char msg[48];
+    snprintf(msg, sizeof(msg), "The game stopped (exit code %d).", r);
+    fatal("GAME ERROR", msg);
 }

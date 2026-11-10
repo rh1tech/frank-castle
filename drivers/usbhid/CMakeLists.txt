@@ -25,6 +25,10 @@ if(USB_HID_ENABLED)
     target_sources(usbhid INTERFACE
         ${CMAKE_CURRENT_LIST_DIR}/hid_app.c
         ${CMAKE_CURRENT_LIST_DIR}/usbhid_wrapper.c
+        ${CMAKE_CURRENT_LIST_DIR}/hid_ri.c
+        ${CMAKE_CURRENT_LIST_DIR}/hid_rip.c
+        ${CMAKE_CURRENT_LIST_DIR}/xinput_host.c
+        ${CMAKE_CURRENT_LIST_DIR}/hid_pad_layout.c
     )
 
     # Include this directory for tusb_config.h
@@ -55,6 +59,8 @@ if(USB_HID_ENABLED)
 else()
     message(STATUS "USB HID Host disabled (use -DUSB_HID_ENABLED=1 to enable)")
     message(STATUS "  USB CDC stdio remains available for debug output")
-    # Stub functions are provided inline in usbhid_wrapper.h
-    # Do NOT include the usbhid directory to avoid tusb_config conflicts
+    # The API as stubs (stub/): the usbhid directory itself is not on the
+    # include path, its tusb_config.h would clash with the CDC console's
+    target_sources(usbhid INTERFACE ${CMAKE_CURRENT_LIST_DIR}/stub/usbhid_stub.c)
+    target_include_directories(usbhid INTERFACE ${CMAKE_CURRENT_LIST_DIR}/stub)
 endif()

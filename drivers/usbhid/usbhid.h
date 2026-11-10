@@ -44,9 +44,38 @@ typedef struct {
     int has_motion;         // Non-zero if motion/button change occurred
 } usbhid_mouse_state_t;
 
+// Gamepad buttons, by position (an Xbox pad's A is SOUTH, a PlayStation
+// pad's cross is SOUTH). The decoders come from pico-speccy: XInput, the
+// DualShock 4 and DualSense, the Logitech F710 in D mode, a few clones and
+// DragonRise-style generic HID pads.
+#define GP_UP     0x00001u
+#define GP_DOWN   0x00002u
+#define GP_LEFT   0x00004u
+#define GP_RIGHT  0x00008u
+#define GP_SOUTH  0x00010u
+#define GP_EAST   0x00020u
+#define GP_WEST   0x00040u
+#define GP_NORTH  0x00080u
+#define GP_L1     0x00100u
+#define GP_R1     0x00200u
+#define GP_L2     0x00400u
+#define GP_R2     0x00800u
+#define GP_START  0x01000u
+#define GP_SELECT 0x02000u
+#define GP_L3     0x04000u
+#define GP_R3     0x08000u
+#define GP_HOME   0x10000u
+#define GP_COUNT  17
+
 //--------------------------------------------------------------------
 // API Functions
 //--------------------------------------------------------------------
+
+/** Buttons held on all connected gamepads together (GP_*). */
+uint32_t usbhid_gamepad_buttons(void);
+
+/** Non-zero while at least one gamepad is connected. */
+int usbhid_gamepad_connected(void);
 
 /**
  * Initialize USB Host HID driver

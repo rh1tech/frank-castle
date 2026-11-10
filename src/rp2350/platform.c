@@ -27,6 +27,7 @@
 #include "hardware/sync.h"
 #include "pico/bootrom.h"
 #include "pico/multicore.h"
+#include "pico/stdio_uart.h"
 #include "ff.h"
 
 #include <stdarg.h>
@@ -115,7 +116,13 @@ void platform_uart_cmd(int ch) {
                 line[clen] = 0;
                 cst = 0;
                 unsigned bits, frames;
-                if (sscanf(line, "pad %x %u", &bits, &frames) == 2) {
+                if (!strncmp(line, "errtest", 7)) {
+                    extern void Shell_ErrTest(const char *what) __attribute__((weak));
+                    if (Shell_ErrTest) Shell_ErrTest(line + 7);
+                } else if (!strcmp(line, "menu")) {
+                    extern void Settings_Request(void) __attribute__((weak));
+                    if (Settings_Request) Settings_Request();
+                } else if (sscanf(line, "pad %x %u", &bits, &frames) == 2) {
                     extern void platform_pad_hold(unsigned bits, unsigned frames) __attribute__((weak));
                     if (platform_pad_hold) platform_pad_hold(bits, frames);
                 } else if (!dbg_cmd_ready) {
@@ -276,8 +283,13 @@ uint32_t platform_init_clocks(void) {
     }
     if (FLASH_MAX_FREQ_MHZ > FLASH_SAFE_MHZ)
         set_flash_timings((int)(clock_get_hz(clk_sys) / 1000000), FLASH_MAX_FREQ_MHZ, FLASH_RXDELAY);
-    /* The UART baud divisor was computed at the boot clock. */
+    /* The UART baud divisor was computed at the boot clock. (The USB CDC
+     * console, USB_HID=OFF, runs from PLL_USB and must not be set up twice.) */
+#if CASTLE_USB_CONSOLE
+    stdio_uart_init();
+#else
     stdio_init_all();
+#endif
     extern void uart_buffered_init(void);
     uart_buffered_init(); /* printf must never stall the game */
     uint32_t hz = clock_get_hz(clk_sys);

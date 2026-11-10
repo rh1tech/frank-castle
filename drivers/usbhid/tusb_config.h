@@ -85,6 +85,9 @@ extern "C" {
 // Keyboard = 1 HID, some mice = 2 HID (boot + extra features)
 #define CFG_TUH_HID 8
 
+// XInput pads (xinput_host.c, an application class driver)
+#define CFG_TUH_XINPUT 1
+
 // CDC host (disable - we don't need to connect to CDC devices)
 #define CFG_TUH_CDC 0
 

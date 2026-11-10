@@ -22,8 +22,11 @@ set(PSRAM_SPEED "168" CACHE STRING "PSRAM max frequency in MHz: 84, 100, 133, 16
 set(PSRAM_RXDELAY "6" CACHE STRING "PSRAM read sampling delay override (empty: derived from the clock)")
 set(FLASH_SPEED "126" CACHE STRING "Flash chip max frequency in MHz")
 set(FLASH_RXDELAY "5" CACHE STRING "Flash read sampling delay override (empty: derived from the clock)")
-# Native USB is always the keyboard host; debug console is UART0 (GPIO0/1).
-set(USB_HID_ENABLED ON)
+# Native USB: the keyboard/gamepad host (release builds), or with
+# -DUSB_HID=OFF a USB CDC console for development (no keyboard then; "~BOOT~"
+# reboots into BOOTSEL from either console). UART0 (GPIO0/1) is always on.
+option(USB_HID "Native USB is the keyboard/gamepad host (OFF: USB CDC console)" ON)
+set(USB_HID_ENABLED ${USB_HID})
 
 if(CPU_SPEED GREATER_EQUAL 504)
     set(CPU_VOLTAGE "VREG_VOLTAGE_1_65")
@@ -100,6 +103,7 @@ set(CASTLE_DEFINES
     PICO_AUDIO_I2S_DATA_PIN=${I2S_DATA_PIN}
     PICO_AUDIO_I2S_CLOCK_PIN_BASE=${I2S_CLK_PIN}
     CASTLE_VERSION="${CASTLE_VERSION}"
+    $<$<NOT:$<BOOL:${USB_HID_ENABLED}>>:CASTLE_USB_CONSOLE=1>
 )
 
 # Platform code shared by the diag and game firmware
@@ -233,6 +237,10 @@ include(cmake/overlays.cmake)
 
 add_executable(frank-castle
     src/rp2350/game_main.c
+    src/rp2350/shell.c
+    src/rp2350/settings.c
+    src/rp2350/ui_gfx.c
+    src/common/ui_font.c
     src/psyz_rp2350/gpu_fast.c
     src/psyz_rp2350/video.c
     src/psyz_rp2350/audio.c
@@ -280,6 +288,12 @@ target_link_options(frank-castle PRIVATE
 )
 set_property(TARGET frank-castle APPEND PROPERTY LINK_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/memmap_castle.ld ${CMAKE_BINARY_DIR}/castle_overlays.ld)
-pico_enable_stdio_usb(frank-castle 0)
+if(USB_HID_ENABLED)
+    pico_enable_stdio_usb(frank-castle 0)
+else()
+    pico_enable_stdio_usb(frank-castle 1)
+    # printf must never wait for a terminal that is not reading
+    target_compile_definitions(frank-castle PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=0)
+endif()
 pico_enable_stdio_uart(frank-castle 1)
 pico_add_extra_outputs(frank-castle)

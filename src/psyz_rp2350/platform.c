@@ -178,27 +178,8 @@ int Psyz_AudioInit(void) {
 /* Pads: USB keyboard -> PS1 digital pad on port 1                     */
 /* ------------------------------------------------------------------ */
 
-extern int usbhid_get_key_action(uint8_t *keycode, int *down);
-
-static uint8_t key_down[256 / 8];
-
-static const struct {
-    uint8_t hid;
-    uint16_t pad;
-} key_map[] = {
-    {0x52, PADLup},    {0x51, PADLdown}, {0x50, PADLleft}, {0x4F, PADLright},
-    {0x1B, PADRdown},  /* X: cross (jump) */
-    {0x1D, PADRleft},  /* Z: square */
-    {0x06, PADRright}, /* C: circle */
-    {0x16, PADRup},    /* S: triangle */
-    {0x04, PADL1},     /* A */
-    {0x07, PADR1},     /* D */
-    {0x14, PADL2},     /* Q */
-    {0x08, PADR2},     /* E */
-    {0x28, PADstart},  /* Enter */
-    {0x2B, PADselect}, /* Tab */
-    {0x2C, PADselect}, /* Space */
-};
+/* Keyboard and gamepads come from the bindings (src/rp2350/settings.c). */
+extern uint32_t Input_PadBits(void);
 
 /* Debug UART input: every received byte presses a button for UART_HOLD
  * frames; sending it again keeps it held (tools/uart.py drives this). */
@@ -225,7 +206,7 @@ void platform_pad_hold(unsigned bits, unsigned frames) {
 
 extern volatile bool platform_uart_scripted;
 
-static unsigned uart_pad_bits(void) {
+unsigned Platform_UartPadBits(void) {
     int ch;
     static bool in_tilde; /* "~...~" is a command, not key presses */
     extern void platform_uart_cmd(int ch);
@@ -255,17 +236,7 @@ static unsigned uart_pad_bits(void) {
 void MyPadInit(int mode) { (void)mode; }
 
 void Psyz_PadsPoll(void) {
-    uint8_t code;
-    int down;
-    while (usbhid_get_key_action(&code, &down)) {
-        if (down)
-            key_down[code >> 3] |= (uint8_t)(1u << (code & 7));
-        else
-            key_down[code >> 3] &= (uint8_t)~(1u << (code & 7));
-    }
-    unsigned pressed = uart_pad_bits();
-    for (unsigned i = 0; i < sizeof(key_map) / sizeof(key_map[0]); i++)
-        if (key_down[key_map[i].hid >> 3] & (1u << (key_map[i].hid & 7))) pressed |= key_map[i].pad;
+    unsigned pressed = Platform_UartPadBits() | Input_PadBits();
 
     char frame[PSYZ_PAD_BUF_LEN];
     memset(frame, 0, sizeof(frame));

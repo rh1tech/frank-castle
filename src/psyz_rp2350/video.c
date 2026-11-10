@@ -55,6 +55,16 @@ static volatile bool frame_expand;
 static uint16_t xmap[PSXV_OUT_W];
 /* when the frame is held in an SRAM framebuffer slot (gpu_fast.c) */
 static const u16 *volatile frame_sram;
+/* where the PSRAM rows come from: VRAM, or a firmware screen */
+static const u16 *volatile frame_base = g_PsxVram;
+static volatile int frame_pitch = VRAM_PITCH;
+/* A screen of the firmware's own (shell.c: welcome, errors, settings):
+ * 320 or 640 x 240 BGR555 in PSRAM, shown instead of the game while set.
+ * Latched at vblank like any display change, so flipping between two such
+ * buffers never shows a half-drawn one. */
+static volatile uintptr_t overlay_fb; /* the buffer | 1 when 640 wide: one store */
+/* black, from SRAM, whatever VRAM holds (Video_HoldBlack) */
+static volatile bool hold_black;
 volatile uint32_t scan_sram, scan_psram; /* latches by source (diagnostic) */
 static volatile int frame_sram_stride, frame_sram_r0, frame_sram_r1;
 
@@ -130,13 +140,19 @@ static volatile int game_disp_x, game_disp_y;
 static volatile bool game_disp_valid;
 
 static void __not_in_flash_func(latch_frame)(void) {
-    int w = disp_w;
+    const uintptr_t ovw = overlay_fb;
+    const u16 *ov = (const u16 *)(ovw & ~(uintptr_t)1);
+    const int ov_w = (ovw & 1) ? 640 : 320;
+    int w = ov ? ov_w : disp_w;
     int ox = disp_x, oy = disp_y;
     if (game_disp_valid) {
         ox = game_disp_x;
         oy = game_disp_y;
     }
-    frame_on = disp_on;
+    if (ov) ox = oy = 0;
+    frame_base = ov ? ov : vram;
+    frame_pitch = ov ? ov_w : VRAM_PITCH;
+    frame_on = ov ? true : disp_on && !hold_black;
     frame_x = ox & (VRAM_W - 1);
     frame_y = oy & (VRAM_H - 1);
     frame_w = w;
@@ -164,7 +180,7 @@ static void __not_in_flash_func(latch_frame)(void) {
     const u16 *base;
     int stride, r0, r1;
     extern volatile uint32_t scan_sram, scan_psram;
-    if (Gpu_ScanoutSource(frame_x, frame_y, &base, &stride, &r0, &r1)) {
+    if (!ov && Gpu_ScanoutSource(frame_x, frame_y, &base, &stride, &r0, &r1)) {
         scan_sram++;
         frame_sram = frame_w == 256 ? base : NULL; /* picture + right margin (PSXV_LINE_DOUBLE_LM) */
         frame_sram_stride = stride;
@@ -209,6 +225,73 @@ static void __not_in_flash_func(on_line)(uint32_t out_line, psxv_line_t *line) {
         psxv_late_band[(row >> 5) & 7]++;
     }
     line->pixels = line_buf[row % NBUF];
+}
+
+/* Core 0: show `fb` (`width` 320 or 640, x 240) from the next vblank on,
+ * NULL: the game again. Returns once the scanout has taken it, so the
+ * caller may then reuse the buffer that was shown before. */
+void Video_SetOverlay(const uint16_t *fb, int width) {
+    overlay_fb = fb ? (uintptr_t)fb | (width == 640) : 0;
+    latch_request = true;
+    uint32_t v = vblank_count;
+    absolute_time_t end = make_timeout_time_ms(50);
+    while (vblank_count == v && !time_reached(end)) tight_loop_contents();
+}
+
+/* Core 0, between bursts of PSRAM writes (the firmware's own screens,
+ * drawn while one of them is scanned out of PSRAM): back-to-back PSRAM
+ * accesses starve core 1's row fetches, and the ring then shows rows from
+ * NBUF lines before (bands shifted down). Wait while the ring's lead over
+ * the beam is short. */
+void Video_PsramPace(void) {
+    const uint32_t t0 = time_us_32();
+    for (;;) {
+        const int beam = beam_row, fill = fill_row;
+        if (beam < 0 || fill >= PSXV_OUT_H / 2 || frame_sram || fill - beam >= NBUF - 6) return; /* FILL_AHEAD - 3 */
+        if (time_us_32() - t0 > 400) return; /* never hang the caller */
+        tight_loop_contents();
+    }
+}
+
+/* Core 0, the game paused: what is on screen now (the game's frame, or a
+ * firmware screen) into `dst`, 640x240 BGR555 as the HDMI shows it, dimmed
+ * to 3/8 (the settings window's backdrop). */
+void Video_GrabFrame(uint16_t *dst) {
+    const u16 *base = frame_base, *sram = frame_sram;
+    const int pitch = frame_pitch, w = frame_w, x0 = frame_x, y0 = frame_y;
+    const int r0 = frame_sram_r0, r1 = frame_sram_r1, stride = frame_sram_stride;
+    /* output columns of the picture: doubled up to 320 wide, stretched at
+     * 368/384, 1:1 from 512 */
+    const int out_w = w <= 320 ? 2 * w : (w == 368 || w == 384) ? PSXV_OUT_W : w > PSXV_OUT_W ? PSXV_OUT_W : w;
+    const int pad = (PSXV_OUT_W - out_w) / 2;
+    for (int y = 0; y < 240; y++) {
+        uint16_t *d = dst + y * PSXV_OUT_W;
+        if (!frame_on) {
+            memset(d, 0, PSXV_OUT_W * 2);
+            continue;
+        }
+        /* the SRAM framebuffer holds a 256-wide picture from column 0 */
+        const bool in_sram = sram && y >= r0 && y < r1;
+        const u16 *row = in_sram ? sram + y * stride : base + ((y0 + y) & (VRAM_H - 1)) * pitch;
+        for (int x = 0; x < PSXV_OUT_W; x++) {
+            const int ox = x - pad;
+            uint16_t p = 0;
+            if (ox >= 0 && ox < out_w) {
+                const int sx = ox * w / out_w;
+                p = in_sram ? row[sx] : row[(x0 + sx) & (VRAM_W - 1)];
+                p = (uint16_t)(((p >> 1) & 0x3DEF) - ((p >> 3) & 0x0C63));
+            }
+            d[x] = p;
+        }
+    }
+}
+
+/* Core 0: black until released (the game's start-up, between the welcome
+ * screen and its first frame: VRAM half drawn) */
+void Video_HoldBlack(bool on) {
+    if (hold_black == on) return;
+    hold_black = on;
+    latch_request = true;
 }
 
 void PsxVideo_Init(void) {
@@ -376,7 +459,7 @@ copy:;
         return true;
     }
     int y = (frame_y + row) & (VRAM_H - 1);
-    const uint32_t *src = (const uint32_t *)&vram[y * VRAM_PITCH + frame_src_x];
+    const uint32_t *src = (const uint32_t *)&frame_base[y * frame_pitch + frame_src_x];
     uint16_t *dst16 = &line_buf[row % NBUF][frame_pad];
     int n = frame_copy_px;
     if (stream_ch >= 0 && !urgent && !(((uintptr_t)src | (uintptr_t)dst16) & 3)) {
@@ -487,6 +570,8 @@ static uint32_t vram_at_ret, shadow_at_ret; /* gpu_vram_us/gpu_shadow_us at the 
 static uint64_t stat_t0, stat_work_us, stat_spu_us;
 extern volatile uint32_t psxv_resyncs;
 extern volatile uint32_t gpu_prim_us, gpu_vram_us, gpu_prims, gpu_shadow_us, audio_underruns, audio_chunk_max_us;
+extern volatile uint32_t audio_hdmi_underruns, psxv_irq_max_us;
+extern uint32_t Audio_Level(void);
 static uint32_t stat_frames, stat_worst_us;
 
 /* "~VERB~" on the UART: full diagnostics in the perf log (they take long
@@ -512,13 +597,14 @@ static void frame_stats(uint64_t work_us) {
     if (!stat_t0) {
         stat_t0 = now;
     } else if (now - stat_t0 >= 2000000) {
-        printf("[perf] %lu fps, game %lu us avg / %lu worst | raster %lu us (%lu prims) vram %lu us shadow %lu us spu %lu us | late rows %lu, audio underruns %lu, mix step max %lu us, scan sram/psram %lu/%lu, disp %d,%d mode %dx%d, hdmi resyncs %lu\n",
+        printf("[perf] %lu fps, game %lu us avg / %lu worst | raster %lu us (%lu prims) vram %lu us shadow %lu us spu %lu us | late rows %lu, audio underruns %lu/%lu hdmi, level %lu, irq max %lu us, mix step max %lu us, scan sram/psram %lu/%lu, disp %d,%d mode %dx%d, hdmi resyncs %lu\n",
                (unsigned long)(stat_frames * 1000000ull / (now - stat_t0)),
                (unsigned long)(stat_work_us / stat_frames), (unsigned long)stat_worst_us,
                (unsigned long)(gpu_prim_us / stat_frames), (unsigned long)(gpu_prims / stat_frames),
                (unsigned long)(gpu_vram_us / stat_frames), (unsigned long)(gpu_shadow_us / stat_frames),
                (unsigned long)(stat_spu_us / stat_frames),
                (unsigned long)psxv_late_rows, (unsigned long)audio_underruns,
+               (unsigned long)audio_hdmi_underruns, (unsigned long)Audio_Level(), (unsigned long)psxv_irq_max_us,
                (unsigned long)audio_chunk_max_us, (unsigned long)scan_sram, (unsigned long)scan_psram,
                frame_x, frame_y, frame_w, disp_h, (unsigned long)psxv_resyncs);
         scan_sram = scan_psram = 0;
@@ -750,9 +836,18 @@ int Platform_GetFxMode(void) { return castle_fx_mode; }
 /* VSync, game core: work_us is how long the frame took before it waited */
 static void fx_frame(uint32_t work_us) {
     extern volatile int soft_fx_reduce, soft_fx_phase;
-    soft_fx_phase ^= 1; /* the halves alternate */
+    /* the same rows are skipped every frame: steady stripes. Swapping the
+     * halves each frame made every reduced effect flicker at 30 Hz. */
+    soft_fx_phase = 0;
     if (castle_fx_mode != 1) {
         soft_fx_reduce = castle_fx_mode == 2;
+        fx_late = fx_calm = 0;
+        return;
+    }
+    /* only in the game's own 256-wide mode: the title and the 368/512-wide
+     * menus run late in PSRAM, not in their effects */
+    if (disp_w != 256) {
+        soft_fx_reduce = 0;
         fx_late = fx_calm = 0;
         return;
     }
@@ -857,6 +952,8 @@ int Psyz_VideoVSync(int mode) {
         psxv_vsync_ret_us = (uint32_t)last_vsync_us;
         extern void platform_usb_poll(void);
         platform_usb_poll(); /* keyboard: once per frame, on the game thread */
+        extern void Settings_Frame(void);
+        Settings_Frame(); /* input; the settings menu (F12) pauses here */
         {
             extern volatile uint32_t audio_frame_us, sd_frame_reads;
             audio_frame_us = sd_frame_reads = 0;

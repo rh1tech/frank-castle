@@ -55,4 +55,15 @@ void hstx_di_queue_tick(void);
  */
 const uint32_t *hstx_di_queue_get_audio_packet(void);
 
+/**
+ * frank-quake2: audio packets made on the fly in the HSTX IRQ from a sample
+ * source (no ring of encoded packets: SRAM is short). frank-castle: the
+ * source fills the packet's 4 stereo frames (left | right << 16) at the HDMI
+ * sample rate. It runs in the IRQ: it and all it touches must be in SRAM.
+ * NULL: silence.
+ */
+typedef void (*hstx_audio_source_t)(uint32_t frames[4]);
+void hstx_di_queue_set_audio_source(hstx_audio_source_t source);
+void hstx_di_queue_post(void);
+
 #endif // HSTX_DATA_ISLAND_QUEUE_H

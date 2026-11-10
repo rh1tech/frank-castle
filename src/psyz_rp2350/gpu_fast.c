@@ -430,8 +430,17 @@ extern volatile uint32_t psxv_vsync_ret_us;
 static uint32_t gq_first_at, gq_last_at;
 volatile uint32_t gq_first_sum, gq_last_sum, gq_full_us;
 
+/* The welcome screen (shell.c) is scanned out of PSRAM by core 1 between
+ * its other work. The game's first GPU commands (VRAM clears and uploads)
+ * keep core 1 too busy for that, and the welcome showed torn for ~0.2 s
+ * before the game's first frame: it goes as soon as the game draws, and
+ * the screen stays black until that frame (settings.c). */
+extern bool shell_active;
+extern void shell_handover(void);
+
 /* hdr words, then payload words */
 static void gq_push2(uint32_t type, const uint32_t *w, uint32_t n, const uint32_t *p, uint32_t pn) {
+    if (__builtin_expect(shell_active, 0)) shell_handover();
     uint32_t total = n + pn;
     uint32_t now = time_us_32() - psxv_vsync_ret_us;
     if (!gq_first_at) gq_first_at = now ? now : 1;

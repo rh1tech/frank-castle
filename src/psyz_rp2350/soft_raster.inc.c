@@ -110,8 +110,10 @@ static SoftState soft_st[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = {0, 0, VRAM_W -
 static int soft_par_c[SOFT_NCORE] = {[0 ... SOFT_NCORE - 1] = -1};
 #define soft_par (soft_par_c[SOFT_CORE_ID()])
 // Reduced effects (soft_fx_reduce, set by the platform per frame): a big
-// semi-transparent primitive draws only half its rows, in pairs that
-// alternate between frames (soft_fx_phase). The light and shadow effects
+// semi-transparent primitive draws only half its rows, in pairs; the same
+// pairs every frame (soft_fx_phase, 0), so the stripes stand still. Flat
+// ones (one colour, no texture: fades, flashes) always draw whole: striped,
+// a fade looks broken. The light and shadow effects
 // stay, at half the cost. soft_skip: -1 draw every row, else the pair
 // parity skipped by the primitive being drawn.
 volatile int soft_fx_reduce, soft_fx_phase;
@@ -928,7 +930,7 @@ SOFT_RASTER_IRAM static void raster_tile(const SV* v, int w, int h, int semi, in
          * negative (a tile just right of the area landed in the margins) */
         return;
     }
-    soft_fx_begin(semi, (xb - xa + 1) * (yb - ya + 1));
+    soft_fx_begin(0, (xb - xa + 1) * (yb - ya + 1)); /* flat: a fade or a flash, never reduced */
 
     /* Opaque fill: nothing to read, nothing to interpolate, one colour for
      * every pixel -- so the general per-pixel path is all overhead. It matters
@@ -1090,7 +1092,7 @@ SOFT_RASTER_IRAM static void raster_tri_impl(const SV* a, const SV* b, const SV*
     if (minx > maxx || miny > maxy) {
         return;
     }
-    soft_fx_begin(semi, (maxx - minx + 1) * (maxy - miny + 1));
+    soft_fx_begin(semi && (textured || gouraud), (maxx - minx + 1) * (maxy - miny + 1)); /* flat: never */
 
     // edge setup: E(x,y) >= 0 inside, top-left edges get the <0 bias on the
     // others so shared edges paint exactly once
